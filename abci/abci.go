@@ -2,6 +2,7 @@ package abci
 
 import (
 	"fmt"
+	"time"
 
 	"cosmossdk.io/log"
 	abci "github.com/cometbft/cometbft/abci/types"
@@ -76,6 +77,8 @@ func (h *ProposalHandler) PrepareProposalHandler() sdk.PrepareProposalHandler {
 			return &abci.PrepareProposalResponse{Txs: req.Txs}, nil
 		}
 
+		tTotal := time.Now()
+
 		// In the case where there is a panic, we recover here and return an empty proposal.
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -99,7 +102,12 @@ func (h *ProposalHandler) PrepareProposalHandler() sdk.PrepareProposalHandler {
 
 		// Fill the proposal with transactions from each lane.
 		prepareLanesHandler := ChainPrepareLanes(h.mempool.Registry())
+		tHandler := time.Now()
 		finalProposal, err := prepareLanesHandler(ctx, proposal)
+		prepareHandlerMs := float64(time.Since(tHandler).Nanoseconds()) / 1e6
+		totalMs := float64(time.Since(tTotal).Nanoseconds()) / 1e6
+		// logfmt: Loki 可直接解析
+		fmt.Printf("msg=sdk_prepare_timing prepare_handler_ms=%.3f total_ms=%.3f\n", prepareHandlerMs, totalMs)
 		if err != nil {
 			h.logger.Error("failed to prepare proposal", "err", err)
 			return &abci.PrepareProposalResponse{Txs: make([][]byte, 0)}, err

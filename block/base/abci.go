@@ -1,6 +1,9 @@
 package base
 
 import (
+	"fmt"
+	"time"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/skip-mev/block-sdk/v2/block"
@@ -22,7 +25,10 @@ func (l *BaseLane) PrepareLane(
 	// Select transactions from the lane respecting the selection logic of the lane and the
 	// max block space for the lane.
 	limit := proposal.GetLaneLimits(l.cfg.MaxBlockSpace)
+
+	t1 := time.Now()
 	txsToInclude, txsToRemove, err := l.prepareLaneHandler(ctx, proposal, limit)
+	prepareUs := time.Since(t1).Microseconds()
 	if err != nil {
 		l.Logger().Error(
 			"failed to prepare lane",
@@ -43,6 +49,7 @@ func (l *BaseLane) PrepareLane(
 	}
 
 	// Get the transaction info for each transaction that was selected.
+	t3 := time.Now()
 	txsWithInfo := make([]utils.TxWithInfo, len(txsToInclude))
 	for i, tx := range txsToInclude {
 		txInfo, err := l.GetTxInfo(ctx, tx)
@@ -58,21 +65,35 @@ func (l *BaseLane) PrepareLane(
 
 		txsWithInfo[i] = txInfo
 	}
+	infoUs := time.Since(t3).Microseconds()
 
 	// Update the proposal with the selected transactions. This fails if the lane attempted to add
 	// more transactions than the allocated max block space for the lane.
-	if err := proposal.UpdateProposal(l, txsWithInfo); err != nil {
+	t4 := time.Now()
+	errUpdate := proposal.UpdateProposal(l, txsWithInfo)
+	updateUs := time.Since(t4).Microseconds()
+
+	totalLaneMs := float64(prepareUs+infoUs+updateUs) / 1e3
+	fmt.Printf("msg=prepare_lane_timing lane=%s total_ms=%.3f prepare_handler_ms=%.3f get_info_ms=%.3f update_ms=%.3f include_count=%d\n",
+		l.Name(), totalLaneMs,
+		float64(prepareUs)/1e3,
+		float64(infoUs)/1e3,
+		float64(updateUs)/1e3,
+		len(txsToInclude),
+	)
+
+	if errUpdate != nil {
 		l.Logger().Error(
 			"failed to update proposal",
 			"lane", l.Name(),
-			"err", err,
+			"err", errUpdate,
 			"num_txs_to_add", len(txsToInclude),
 			"num_txs_to_remove", len(txsToRemove),
 			"lane_max_block_size", limit.MaxTxBytes,
 			"lane_max_gas_limit", limit.MaxGasLimit,
 		)
 
-		return proposal, err
+		return proposal, errUpdate
 	}
 
 	l.Logger().Debug(

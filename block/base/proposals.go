@@ -2,6 +2,7 @@ package base
 
 import (
 	"fmt"
+	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
@@ -38,14 +39,38 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 		// TODO(max): rewrite debugging to use LazyHash once this commit is available as part of cometbftv1 migration:
 		// https://github.com/cometbft/cometbft/commit/fad150950f1b6095b89e140e1286de027fe9778f
 
+		// Accumulated timing (microseconds) per block for lane_sim_timing log.
+		var (
+			accSelectUs  int64
+			accTxInfoUs  int64
+			accVerifyUs  int64
+			accNextUs    int64
+			accLoggingUs int64
+			iterCount    int64
+		)
+
 		// Select all transactions in the mempool that are valid and not already in the
 		// partial proposal.
-		for iterator := h.lane.Select(ctx, nil); iterator != nil; iterator = iterator.Next() {
+		tSel := time.Now()
+		iterator := h.lane.Select(ctx, nil)
+		accSelectUs += time.Since(tSel).Microseconds()
+
+		for ; iterator != nil; func() {
+			tNext := time.Now()
+			iterator = iterator.Next()
+			accNextUs += time.Since(tNext).Microseconds()
+		}() {
 			tx := iterator.Tx()
 
+			iterCount++
+			tInfo := time.Now()
 			txInfo, err := h.lane.GetTxInfo(ctx, tx)
+			accTxInfoUs += time.Since(tInfo).Microseconds()
+
 			if err != nil {
+				tLog := time.Now()
 				h.lane.Logger().Info("failed to get hash of tx", "err", err)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				txsToRemove = append(txsToRemove, tx)
 				continue
@@ -54,16 +79,19 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			// If the transaction is from a skipped sender, we skip it altogether. Allows to avoid sequence error when
 			// first skipped tx is not included in the proposal.
 			if _, ok := skippedSigners[string(txInfo.Signers[0].Signer.Bytes())]; ok {
+				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx from skipped sender",
 					"tx_hash", txInfo.Hash,
 					"lane", h.lane.Name(),
 				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				continue
 			}
 
 			if txInfo.GasLimit > limit.MaxGasLimit {
+				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; gas limit above the maximum allowed",
 					"lane", h.lane.Name(),
@@ -71,12 +99,14 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					"max_gas", limit.MaxGasLimit,
 					"tx_hash", txInfo.Hash,
 				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				txsToRemove = append(txsToRemove, tx)
 				continue
 			}
 
 			if txInfo.Size > limit.MaxTxBytes {
+				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx bytes above the maximum allowed",
 					"lane", h.lane.Name(),
@@ -84,6 +114,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					"max_tx_bytes", limit.MaxTxBytes,
 					"tx_hash", txInfo.Hash,
 				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				txsToRemove = append(txsToRemove, tx)
 				continue
@@ -91,11 +122,13 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 
 			// Double check that the transaction belongs to this lane.
 			if !h.lane.Match(ctx, tx) {
+				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx does not belong to lane",
 					"tx_hash", txInfo.Hash,
 					"lane", h.lane.Name(),
 				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				txsToRemove = append(txsToRemove, tx)
 				continue
@@ -103,11 +136,13 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 
 			// if the transaction is already in the (partial) block proposal, we skip it.
 			if proposal.Contains(txInfo.Hash) {
+				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx is already in proposal",
 					"tx_hash", txInfo.Hash,
 					"lane", h.lane.Name(),
 				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				continue
 			}
@@ -115,6 +150,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			// If the transaction is too large, we skip it,
 			// but also have to prevent anything from the same sender from being included during this iteration.
 			if updatedSize := totalSize + txInfo.Size; updatedSize > limit.MaxTxBytes {
+				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx bytes above the maximum allowed",
 					"lane", h.lane.Name(),
@@ -123,6 +159,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					"max_tx_bytes", limit.MaxTxBytes,
 					"tx_hash", txInfo.Hash,
 				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				// using bytes representation of the signer to avoid unnecessary allocations
 				skippedSigners[string(txInfo.Signers[0].Signer.Bytes())] = struct{}{}
@@ -133,6 +170,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			// If the gas limit of the transaction is too large, we skip it,
 			// but also have to prevent anything from the same sender from being included during this iteration.
 			if updatedGas := totalGas + txInfo.GasLimit; updatedGas > limit.MaxGasLimit {
+				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; gas limit above the maximum allowed",
 					"lane", h.lane.Name(),
@@ -141,6 +179,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					"max_gas", limit.MaxGasLimit,
 					"tx_hash", txInfo.Hash,
 				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				// using bytes representation of the signer to avoid unnecessary allocations
 				skippedSigners[string(txInfo.Signers[0].Signer.Bytes())] = struct{}{}
@@ -149,20 +188,30 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			}
 
 			// Verify the transaction.
+			tVerify := time.Now()
 			if err = h.lane.VerifyTx(ctx, tx, false); err != nil {
+				accVerifyUs += time.Since(tVerify).Microseconds()
+				tLog := time.Now()
 				h.lane.Logger().Info(
 					"failed to verify tx",
 					"tx_hash", txInfo.Hash,
 					"err", err,
 				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
 				txsToRemove = append(txsToRemove, tx)
 				continue
 			}
+			accVerifyUs += time.Since(tVerify).Microseconds()
 
 			totalSize += txInfo.Size
 			totalGas += txInfo.GasLimit
 			txsToInclude = append(txsToInclude, tx)
+		}
+
+		if h.lane.Name() == "exchange" {
+			fmt.Printf("msg=lane_sim_timing lane=%s iter_count=%d select_us=%d tx_info_us=%d verify_us=%d next_us=%d logging_us=%d\n",
+				h.lane.Name(), iterCount, accSelectUs, accTxInfoUs, accVerifyUs, accNextUs, accLoggingUs)
 		}
 
 		return txsToInclude, txsToRemove, nil
