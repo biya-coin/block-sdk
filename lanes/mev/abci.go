@@ -8,6 +8,7 @@ import (
 
 	"github.com/skip-mev/block-sdk/v2/block/base"
 	"github.com/skip-mev/block-sdk/v2/block/proposals"
+	"github.com/skip-mev/block-sdk/v2/block/utils"
 )
 
 // Implements the MEV lane's PrepareLaneHandler and ProcessLaneHandler.
@@ -29,7 +30,7 @@ func NewProposalHandler(lane *base.BaseLane, factory Factory) *ProposalHandler {
 // will return no transactions if no valid bids are found. If any of the bids are invalid,
 // it will return them and will only remove the bids and not the bundled transactions.
 func (h *ProposalHandler) PrepareLaneHandler() base.PrepareLaneHandler {
-	return func(ctx sdk.Context, proposal proposals.Proposal, limit proposals.LaneLimits) ([]sdk.Tx, []sdk.Tx, error) {
+	return func(ctx sdk.Context, proposal proposals.Proposal, limit proposals.LaneLimits) ([]sdk.Tx, []utils.TxWithInfo, []sdk.Tx, error) {
 		// Define all of the info we need to select transactions for the partial proposal.
 		var (
 			txsToInclude []sdk.Tx
@@ -84,7 +85,8 @@ func (h *ProposalHandler) PrepareLaneHandler() base.PrepareLaneHandler {
 			break
 		}
 
-		return txsToInclude, txsToRemove, nil
+		// txsWithInfo is not pre-computed by the MEV handler; abci.go will fall back to GetTxInfo.
+		return txsToInclude, nil, txsToRemove, nil
 	}
 }
 

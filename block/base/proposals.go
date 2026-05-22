@@ -7,6 +7,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/skip-mev/block-sdk/v2/block/proposals"
+	"github.com/skip-mev/block-sdk/v2/block/utils"
 )
 
 // DefaultProposalHandler returns a default implementation of the PrepareLaneHandler and
@@ -27,11 +28,12 @@ func NewDefaultProposalHandler(lane *BaseLane) *DefaultProposalHandler {
 // proposal. It will continue to reap transactions until the maximum blockspace/gas for this
 // lane has been reached. Additionally, any transactions that are invalid will be returned.
 func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
-	return func(ctx sdk.Context, proposal proposals.Proposal, limit proposals.LaneLimits) ([]sdk.Tx, []sdk.Tx, error) {
+	return func(ctx sdk.Context, proposal proposals.Proposal, limit proposals.LaneLimits) ([]sdk.Tx, []utils.TxWithInfo, []sdk.Tx, error) {
 		var (
 			totalSize      int64
 			totalGas       uint64
 			txsToInclude   []sdk.Tx
+			txsWithInfo    []utils.TxWithInfo
 			txsToRemove    []sdk.Tx
 			skippedSigners = make(map[string]struct{})
 		)
@@ -48,6 +50,9 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			accLoggingUs int64
 			iterCount    int64
 		)
+
+		minRemainingSizeToContinue := limit.MaxTxBytes / 1000
+		minRemainingGasToContinue := limit.MaxGasLimit / 1000
 
 		// Select all transactions in the mempool that are valid and not already in the
 		// partial proposal.
@@ -161,6 +166,22 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 				)
 				accLoggingUs += time.Since(tLog).Microseconds()
 
+				// Early-break: if remaining byte budget is less than 1/1000 of the limit,
+				// further scanning is unlikely to find a fitting tx — stop early.
+				remainingSize := limit.MaxTxBytes - totalSize
+				if remainingSize < minRemainingSizeToContinue {
+					tLog = time.Now()
+					h.lane.Logger().Debug(
+						"stopping lane selection; remaining byte budget below continuation threshold",
+						"lane", h.lane.Name(),
+						"remaining_bytes", remainingSize,
+						"continue_threshold_bytes", minRemainingSizeToContinue,
+						"max_tx_bytes", limit.MaxTxBytes,
+					)
+					accLoggingUs += time.Since(tLog).Microseconds()
+					break
+				}
+
 				// using bytes representation of the signer to avoid unnecessary allocations
 				skippedSigners[string(txInfo.Signers[0].Signer.Bytes())] = struct{}{}
 
@@ -180,6 +201,22 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					"tx_hash", txInfo.Hash,
 				)
 				accLoggingUs += time.Since(tLog).Microseconds()
+
+				// Early-break: if remaining gas budget is less than 1/1000 of the limit,
+				// further scanning is unlikely to find a fitting tx — stop early.
+				remainingGas := limit.MaxGasLimit - totalGas
+				if remainingGas < minRemainingGasToContinue {
+					tLog = time.Now()
+					h.lane.Logger().Debug(
+						"stopping lane selection; remaining gas budget below continuation threshold",
+						"lane", h.lane.Name(),
+						"remaining_gas", remainingGas,
+						"continue_threshold_gas", minRemainingGasToContinue,
+						"max_gas", limit.MaxGasLimit,
+					)
+					accLoggingUs += time.Since(tLog).Microseconds()
+					break
+				}
 
 				// using bytes representation of the signer to avoid unnecessary allocations
 				skippedSigners[string(txInfo.Signers[0].Signer.Bytes())] = struct{}{}
@@ -207,6 +244,8 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			totalSize += txInfo.Size
 			totalGas += txInfo.GasLimit
 			txsToInclude = append(txsToInclude, tx)
+			// Carry the already-computed TxWithInfo so the caller avoids a second GetTxInfo call.
+			txsWithInfo = append(txsWithInfo, txInfo)
 		}
 
 		if h.lane.Name() == "exchange" {
@@ -214,7 +253,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 				h.lane.Name(), iterCount, accSelectUs, accTxInfoUs, accVerifyUs, accNextUs, accLoggingUs)
 		}
 
-		return txsToInclude, txsToRemove, nil
+		return txsToInclude, txsWithInfo, txsToRemove, nil
 	}
 }
 

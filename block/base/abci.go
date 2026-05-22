@@ -27,7 +27,7 @@ func (l *BaseLane) PrepareLane(
 	limit := proposal.GetLaneLimits(l.cfg.MaxBlockSpace)
 
 	t1 := time.Now()
-	txsToInclude, txsToRemove, err := l.prepareLaneHandler(ctx, proposal, limit)
+	txsToInclude, cachedTxsWithInfo, txsToRemove, err := l.prepareLaneHandler(ctx, proposal, limit)
 	prepareUs := time.Since(t1).Microseconds()
 	if err != nil {
 		l.Logger().Error(
@@ -48,10 +48,17 @@ func (l *BaseLane) PrepareLane(
 		)
 	}
 
-	// Get the transaction info for each transaction that was selected.
+	// Get the transaction info for each selected transaction.
+	// The handler appends txsToInclude and cachedTxsWithInfo in lockstep, so indices always
+	// correspond. If the handler did not pre-compute TxWithInfo (e.g. MEV lane returns nil),
+	// cachedTxsWithInfo is empty and we fall back to GetTxInfo for every tx.
 	t3 := time.Now()
 	txsWithInfo := make([]utils.TxWithInfo, len(txsToInclude))
 	for i, tx := range txsToInclude {
+		if i < len(cachedTxsWithInfo) {
+			txsWithInfo[i] = cachedTxsWithInfo[i]
+			continue
+		}
 		txInfo, err := l.GetTxInfo(ctx, tx)
 		if err != nil {
 			l.Logger().Error(
@@ -62,7 +69,6 @@ func (l *BaseLane) PrepareLane(
 
 			return proposal, err
 		}
-
 		txsWithInfo[i] = txInfo
 	}
 	infoUs := time.Since(t3).Microseconds()

@@ -4,6 +4,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/skip-mev/block-sdk/v2/block/proposals"
+	"github.com/skip-mev/block-sdk/v2/block/utils"
 )
 
 type (
@@ -13,12 +14,13 @@ type (
 
 	// PrepareLaneHandler is responsible for preparing transactions to be included in the block from a
 	// given lane. Given a lane, this function should return the transactions to include in the block,
-	// the transactions that must be removed from the lane, and an error if one occurred.
+	// the pre-computed TxWithInfo for each included tx (nil if not available, caller should fall back
+	// to GetTxInfo), the transactions that must be removed from the lane, and an error if one occurred.
 	PrepareLaneHandler func(
 		ctx sdk.Context,
 		proposal proposals.Proposal,
 		limit proposals.LaneLimits,
-	) (txsToInclude []sdk.Tx, txsToRemove []sdk.Tx, err error)
+	) (txsToInclude []sdk.Tx, txsWithInfo []utils.TxWithInfo, txsToRemove []sdk.Tx, err error)
 
 	// ProcessLaneHandler is responsible for processing transactions that are included in a block and
 	// belong to a given lane. The handler must return the transactions that were successfully processed
@@ -33,15 +35,15 @@ type (
 // NoOpPrepareLaneHandler returns a no-op prepare lane handler.
 // This should only be used for testing.
 func NoOpPrepareLaneHandler() PrepareLaneHandler {
-	return func(sdk.Context, proposals.Proposal, proposals.LaneLimits) ([]sdk.Tx, []sdk.Tx, error) {
-		return nil, nil, nil
+	return func(sdk.Context, proposals.Proposal, proposals.LaneLimits) ([]sdk.Tx, []utils.TxWithInfo, []sdk.Tx, error) {
+		return nil, nil, nil, nil
 	}
 }
 
 // PanicPrepareLaneHandler returns a prepare lane handler that panics.
 // This should only be used for testing.
 func PanicPrepareLaneHandler() PrepareLaneHandler {
-	return func(sdk.Context, proposals.Proposal, proposals.LaneLimits) ([]sdk.Tx, []sdk.Tx, error) {
+	return func(sdk.Context, proposals.Proposal, proposals.LaneLimits) ([]sdk.Tx, []utils.TxWithInfo, []sdk.Tx, error) {
 		panic("panic prepare lanes handler")
 	}
 }
