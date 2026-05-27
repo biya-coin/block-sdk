@@ -251,6 +251,11 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 		if h.lane.Name() == "exchange" {
 			fmt.Printf("msg=lane_sim_timing lane=%s iter_count=%d select_us=%d tx_info_us=%d verify_us=%d next_us=%d logging_us=%d\n",
 				h.lane.Name(), iterCount, accSelectUs, accTxInfoUs, accVerifyUs, accNextUs, accLoggingUs)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "select").Observe(float64(accSelectUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "tx_info").Observe(float64(accTxInfoUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "verify").Observe(float64(accVerifyUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "next").Observe(float64(accNextUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "logging").Observe(float64(accLoggingUs) / 1e6)
 		}
 
 		return txsToInclude, txsWithInfo, txsToRemove, nil

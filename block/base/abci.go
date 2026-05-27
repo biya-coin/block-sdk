@@ -87,6 +87,9 @@ func (l *BaseLane) PrepareLane(
 		float64(updateUs)/1e3,
 		len(txsToInclude),
 	)
+	PrepareLaneSeconds.WithLabelValues(l.Name(), "handler").Observe(float64(prepareUs) / 1e6)
+	PrepareLaneSeconds.WithLabelValues(l.Name(), "get_info").Observe(float64(infoUs) / 1e6)
+	PrepareLaneSeconds.WithLabelValues(l.Name(), "update").Observe(float64(updateUs) / 1e6)
 
 	if errUpdate != nil {
 		l.Logger().Error(
