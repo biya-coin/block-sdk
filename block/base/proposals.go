@@ -23,11 +23,20 @@ type senderInfoGetter interface {
 const FastNonceFlushSender = "\x00flush\x00"
 
 // FastNonceVerifier is an optional callback for single-signer transactions.
-// It should atomically verify that `sender`'s current sequence equals `nonce`,
-// then increment the sequence in the cached context state.
-// Returning a non-nil error causes the tx to be skipped/removed.
+// It verifies that `sender`'s current sequence matches `nonce` and increments
+// the sequence in the cached context state on success.
+//
+// Return values:
+//   - cmp < 0 : nonce < expected (stale tx). Caller should skip this tx but
+//     continue scanning — the next nonce from this sender may match.
+//   - cmp == 0: nonce == expected (match). Tx is valid; caller should include it.
+//   - cmp > 0 : nonce > expected (future tx / gap). Caller should skip the
+//     entire sender — all subsequent nonces are even larger.
+//   - err != nil: non-nonce error (unknown account, bad address, etc.).
+//     Caller should remove the tx from the mempool.
+//
 // When nil, PrepareLaneHandler falls back to the full VerifyTx path.
-type FastNonceVerifier func(ctx sdk.Context, sender string, nonce uint64) error
+type FastNonceVerifier func(ctx sdk.Context, sender string, nonce uint64) (cmp int, err error)
 
 // DefaultProposalHandler returns a default implementation of the PrepareLaneHandler and
 // ProcessLaneHandler.
@@ -84,7 +93,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 		// Flush any cached account writes (from FastNonceVerifier) when the lane
 		// handler returns, regardless of whether it exits normally or via break.
 		if h.fastNonceVerifier != nil {
-			defer func() { _ = h.fastNonceVerifier(ctx, FastNonceFlushSender, 0) }()
+			defer func() { _, _ = h.fastNonceVerifier(ctx, FastNonceFlushSender, 0) }()
 		}
 
 		// Select all transactions in the mempool that are valid and not already in the
@@ -299,20 +308,33 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 
 				case 1:
 					// Single signer: use the sender/nonce already extracted from the iterator key.
-					// On nonce mismatch the tx cannot be packed now (a prior tx is missing),
-					// so we skip the entire sender rather than permanently removing the tx.
-					if verifyErr := h.fastNonceVerifier(ctx, senderStr, senderNonce); verifyErr != nil {
+					// senderIndex is iterated in ascending nonce order, so:
+					//   cmp < 0 (stale):  nonce < expected → just skip this tx, next nonce may match.
+					//   cmp > 0 (future): nonce > expected → all subsequent nonces are larger too,
+					//                      skip the entire sender to avoid scanning them all.
+					//   err != nil:        non-nonce error → remove the tx.
+					cmp, verifyErr := h.fastNonceVerifier(ctx, senderStr, senderNonce)
+					if verifyErr != nil {
 						accVerifyUs += time.Since(tVerify).Microseconds()
 						h.lane.Logger().Info(
-							"failed fast nonce verify (single signer)",
+							"failed fast nonce verify (single signer), removing tx",
 							"tx_hash", txInfo.Hash,
 							"sender", senderStr,
 							"err", verifyErr,
 						)
-						if senderStr != "" {
-							skippedSenders[senderStr] = struct{}{}
+						txsToRemove = append(txsToRemove, tx)
+						continue
+					}
+					if cmp != 0 {
+						accVerifyUs += time.Since(tVerify).Microseconds()
+						if cmp > 0 {
+							// future tx: gap in nonces, all following txs from this sender are also future.
+							if senderStr != "" {
+								skippedSenders[senderStr] = struct{}{}
+							}
+						} else {
+							txsToRemove = append(txsToRemove, tx)
 						}
-						// Do NOT remove: the tx itself may be valid in a later block.
 						continue
 					}
 
@@ -335,13 +357,18 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					var multiErr error
 					for i, addrBytes := range signers {
 						addrStr := sdk.AccAddress(addrBytes).String()
-						if verifyErr := h.fastNonceVerifier(ctx, addrStr, sigs[i].Sequence); verifyErr != nil {
+						cmp, verifyErr := h.fastNonceVerifier(ctx, addrStr, sigs[i].Sequence)
+						if verifyErr != nil {
 							multiErr = verifyErr
+						} else if cmp != 0 {
+							multiErr = fmt.Errorf("nonce mismatch for signer %s", addrStr)
+						}
+						if multiErr != nil {
 							h.lane.Logger().Info(
 								"failed fast nonce verify (multi signer)",
 								"tx_hash", txInfo.Hash,
 								"signer", addrStr,
-								"err", verifyErr,
+								"err", multiErr,
 							)
 							break
 						}
