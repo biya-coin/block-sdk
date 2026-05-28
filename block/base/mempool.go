@@ -35,16 +35,19 @@ type (
 
 // NewMempool returns a new Mempool.
 func NewMempool[C comparable](txPriority TxPriority[C], extractor signer_extraction.Adapter, maxTx int) *Mempool[C] {
+	return NewMempoolWithConfig(PriorityNonceMempoolConfig[C]{
+		TxPriority: txPriority,
+		MaxTx:      maxTx,
+	}, extractor)
+}
+
+// NewMempoolWithConfig returns a new Mempool with a fully specified config,
+// allowing callers to set options such as SkipReorderTies.
+func NewMempoolWithConfig[C comparable](cfg PriorityNonceMempoolConfig[C], extractor signer_extraction.Adapter) *Mempool[C] {
 	return &Mempool[C]{
-		index: NewPriorityMempool(
-			PriorityNonceMempoolConfig[C]{
-				TxPriority: txPriority,
-				MaxTx:      maxTx,
-			},
-			extractor,
-		),
+		index:      NewPriorityMempool(cfg, extractor),
 		extractor:  extractor,
-		txPriority: txPriority,
+		txPriority: cfg.TxPriority,
 	}
 }
 

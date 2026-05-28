@@ -14,6 +14,20 @@ func WithAnteHandler(anteHandler sdk.AnteHandler) LaneOption {
 	return func(l *BaseLane) { l.cfg.AnteHandler = anteHandler }
 }
 
+// WithFastNonceVerifier sets an optional fast-path nonce verifier on the lane
+// and immediately rebuilds the prepareLaneHandler to pick it up.
+// Safe to use either at construction time (via NewBaseLane options) or
+// after construction (via lane.WithOptions).
+func WithFastNonceVerifier(fn FastNonceVerifier) LaneOption {
+	return func(l *BaseLane) {
+		l.fastNonceVerifier = fn
+		// Rebuild the prepare handler so the new verifier takes effect immediately.
+		handler := NewDefaultProposalHandler(l)
+		handler.WithFastNonceVerifier(fn)
+		l.prepareLaneHandler = handler.PrepareLaneHandler()
+	}
+}
+
 // WithPrepareLaneHandler sets the prepare lane handler for the lane. This handler
 // is called when a new proposal is being requested and the lane needs to submit
 // transactions it wants included in the block.

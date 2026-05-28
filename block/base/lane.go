@@ -43,6 +43,10 @@ type BaseLane struct { //nolint
 	// verified and the lane needs to verify that the transactions included in the proposal
 	// are valid respecting the verification logic of the lane.
 	processLaneHandler ProcessLaneHandler
+
+	// fastNonceVerifier is an optional fast-path nonce checker for single-signer txs.
+	// When set, PrepareLaneHandler uses it instead of a full VerifyTx call.
+	fastNonceVerifier FastNonceVerifier
 }
 
 // NewBaseLane returns a new lane base. When creating this lane, the type
@@ -67,6 +71,9 @@ func NewBaseLane(
 	lane.matchHandler = DefaultMatchHandler()
 
 	handler := NewDefaultProposalHandler(lane)
+	if lane.fastNonceVerifier != nil {
+		handler.WithFastNonceVerifier(lane.fastNonceVerifier)
+	}
 	lane.prepareLaneHandler = handler.PrepareLaneHandler()
 	lane.processLaneHandler = handler.ProcessLaneHandler()
 

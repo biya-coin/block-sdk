@@ -62,6 +62,11 @@ type (
 		//   (sequence number) when evicting transactions.
 		// - if MaxTx < 0, `Insert` is a no-op.
 		MaxTx int
+
+		// SkipReorderTies disables the reorderPriorityTies pass in Select().
+		// Set this to true when tx priority is static per-sender (e.g. a fee-discount
+		// tier fetched at Insert time), making weight computation a no-op.
+		SkipReorderTies bool
 	}
 
 	// PriorityNonceMempool is a mempool implementation that stores txs
@@ -379,6 +384,13 @@ func (i *PriorityNonceIterator[C]) Tx() sdk.Tx {
 	return i.senderCursors[i.sender].Value.(sdk.Tx)
 }
 
+// SenderInfo returns the sender (bech32) and nonce of the current transaction
+// directly from the mempool index key, avoiding a tx-decode/GetSigners call.
+func (i *PriorityNonceIterator[C]) SenderInfo() (sender string, nonce uint64) {
+	key := i.senderCursors[i.sender].Key().(txMeta[C])
+	return key.sender, key.nonce
+}
+
 // Select returns a set of transactions from the mempool, ordered by priority
 // and sender-nonce in O(n) time. The passed in list of transactions are ignored.
 // This is a readonly operation, the mempool is not modified.
@@ -393,7 +405,9 @@ func (mp *PriorityNonceMempool[C]) Select(_ context.Context, _ [][]byte) sdkmemp
 		return nil
 	}
 
-	mp.reorderPriorityTies()
+	if !mp.cfg.SkipReorderTies {
+		mp.reorderPriorityTies()
+	}
 
 	iterator := &PriorityNonceIterator[C]{
 		mempool:       mp,

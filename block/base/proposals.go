@@ -5,15 +5,30 @@ import (
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/x/auth/signing"
 
 	"github.com/skip-mev/block-sdk/v2/block/proposals"
 	"github.com/skip-mev/block-sdk/v2/block/utils"
 )
 
+// senderInfoGetter is implemented by PriorityNonceIterator to expose sender/nonce
+// from the mempool index key without re-parsing the transaction.
+type senderInfoGetter interface {
+	SenderInfo() (sender string, nonce uint64)
+}
+
+// FastNonceVerifier is an optional callback for single-signer transactions.
+// It should atomically verify that `sender`'s current sequence equals `nonce`,
+// then increment the sequence in the cached context state.
+// Returning a non-nil error causes the tx to be skipped/removed.
+// When nil, PrepareLaneHandler falls back to the full VerifyTx path.
+type FastNonceVerifier func(ctx sdk.Context, sender string, nonce uint64) error
+
 // DefaultProposalHandler returns a default implementation of the PrepareLaneHandler and
 // ProcessLaneHandler.
 type DefaultProposalHandler struct {
-	lane *BaseLane
+	lane              *BaseLane
+	fastNonceVerifier FastNonceVerifier
 }
 
 // NewDefaultProposalHandler returns a new default proposal handler.
@@ -21,6 +36,13 @@ func NewDefaultProposalHandler(lane *BaseLane) *DefaultProposalHandler {
 	return &DefaultProposalHandler{
 		lane: lane,
 	}
+}
+
+// WithFastNonceVerifier sets an optional fast-path nonce verifier used for
+// single-signer transactions, avoiding a full VerifyTx / GetSigners call.
+func (h *DefaultProposalHandler) WithFastNonceVerifier(fn FastNonceVerifier) *DefaultProposalHandler {
+	h.fastNonceVerifier = fn
+	return h
 }
 
 // DefaultPrepareLaneHandler returns a default implementation of the PrepareLaneHandler. It
@@ -35,7 +57,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			txsToInclude   []sdk.Tx
 			txsWithInfo    []utils.TxWithInfo
 			txsToRemove    []sdk.Tx
-			skippedSigners = make(map[string]struct{})
+			skippedSenders = make(map[string]struct{})
 		)
 
 		// TODO(max): rewrite debugging to use LazyHash once this commit is available as part of cometbftv1 migration:
@@ -67,9 +89,16 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 		}() {
 			tx := iterator.Tx()
 
+			// Get sender and nonce from the mempool index key (set at Insert time from signers[0]).
+			var senderStr string
+			var senderNonce uint64
+			if sig, ok := iterator.(senderInfoGetter); ok {
+				senderStr, senderNonce = sig.SenderInfo()
+			}
+
 			iterCount++
 			tInfo := time.Now()
-			txInfo, err := h.lane.GetTxInfo(ctx, tx)
+			txInfo, err := h.lane.GetTxInfoLight(ctx, tx)
 			accTxInfoUs += time.Since(tInfo).Microseconds()
 
 			if err != nil {
@@ -83,16 +112,18 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 
 			// If the transaction is from a skipped sender, we skip it altogether. Allows to avoid sequence error when
 			// first skipped tx is not included in the proposal.
-			if _, ok := skippedSigners[string(txInfo.Signers[0].Signer.Bytes())]; ok {
-				tLog := time.Now()
-				h.lane.Logger().Debug(
-					"failed to select tx for lane; tx from skipped sender",
-					"tx_hash", txInfo.Hash,
-					"lane", h.lane.Name(),
-				)
-				accLoggingUs += time.Since(tLog).Microseconds()
+			if senderStr != "" {
+				if _, ok := skippedSenders[senderStr]; ok {
+					tLog := time.Now()
+					h.lane.Logger().Debug(
+						"failed to select tx for lane; tx from skipped sender",
+						"tx_hash", txInfo.Hash,
+						"lane", h.lane.Name(),
+					)
+					accLoggingUs += time.Since(tLog).Microseconds()
 
-				continue
+					continue
+				}
 			}
 
 			if txInfo.GasLimit > limit.MaxGasLimit {
@@ -182,8 +213,10 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					break
 				}
 
-				// using bytes representation of the signer to avoid unnecessary allocations
-				skippedSigners[string(txInfo.Signers[0].Signer.Bytes())] = struct{}{}
+				// using bech32 sender string as map key directly
+				if senderStr != "" {
+					skippedSenders[senderStr] = struct{}{}
+				}
 
 				continue
 			}
@@ -218,26 +251,108 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					break
 				}
 
-				// using bytes representation of the signer to avoid unnecessary allocations
-				skippedSigners[string(txInfo.Signers[0].Signer.Bytes())] = struct{}{}
+				// using bech32 sender string as map key directly
+				if senderStr != "" {
+					skippedSenders[senderStr] = struct{}{}
+				}
 
 				continue
 			}
 
-			// Verify the transaction.
+			// Verify nonce(s). When FastNonceVerifier is set, parse signature count
+			// to choose the optimal path and avoid a full VerifyTx / GetSigners call.
 			tVerify := time.Now()
-			if err = h.lane.VerifyTx(ctx, tx, false); err != nil {
-				accVerifyUs += time.Since(tVerify).Microseconds()
-				tLog := time.Now()
-				h.lane.Logger().Info(
-					"failed to verify tx",
-					"tx_hash", txInfo.Hash,
-					"err", err,
-				)
-				accLoggingUs += time.Since(tLog).Microseconds()
+			if h.fastNonceVerifier != nil {
+				sigTx, ok := tx.(signing.SigVerifiableTx)
+				if !ok {
+					accVerifyUs += time.Since(tVerify).Microseconds()
+					h.lane.Logger().Info("tx does not implement SigVerifiableTx", "tx_hash", txInfo.Hash)
+					txsToRemove = append(txsToRemove, tx)
+					continue
+				}
+				sigs, sigErr := sigTx.GetSignaturesV2()
+				if sigErr != nil {
+					accVerifyUs += time.Since(tVerify).Microseconds()
+					h.lane.Logger().Info("failed to get signatures", "tx_hash", txInfo.Hash, "err", sigErr)
+					txsToRemove = append(txsToRemove, tx)
+					continue
+				}
 
-				txsToRemove = append(txsToRemove, tx)
-				continue
+				switch len(sigs) {
+				case 0:
+					// No signatures at all — invalid tx, remove.
+					accVerifyUs += time.Since(tVerify).Microseconds()
+					h.lane.Logger().Info("tx has no signatures", "tx_hash", txInfo.Hash)
+					txsToRemove = append(txsToRemove, tx)
+					continue
+
+				case 1:
+					// Single signer: use the sender/nonce already extracted from the iterator key.
+					// On nonce mismatch the tx cannot be packed now (a prior tx is missing),
+					// so we skip the entire sender rather than permanently removing the tx.
+					if verifyErr := h.fastNonceVerifier(ctx, senderStr, senderNonce); verifyErr != nil {
+						accVerifyUs += time.Since(tVerify).Microseconds()
+						h.lane.Logger().Info(
+							"failed fast nonce verify (single signer)",
+							"tx_hash", txInfo.Hash,
+							"sender", senderStr,
+							"err", verifyErr,
+						)
+						if senderStr != "" {
+							skippedSenders[senderStr] = struct{}{}
+						}
+						// Do NOT remove: the tx itself may be valid in a later block.
+						continue
+					}
+
+				default:
+					// Multiple independent signers: pair GetSigners() with GetSignaturesV2().
+					// This is rare; the GetSigners() call overhead here is acceptable.
+					signers, signersErr := sigTx.GetSigners()
+					if signersErr != nil {
+						accVerifyUs += time.Since(tVerify).Microseconds()
+						h.lane.Logger().Info("failed to get signers", "tx_hash", txInfo.Hash, "err", signersErr)
+						txsToRemove = append(txsToRemove, tx)
+						continue
+					}
+					if len(signers) != len(sigs) {
+						accVerifyUs += time.Since(tVerify).Microseconds()
+						h.lane.Logger().Info("signer/signature count mismatch", "tx_hash", txInfo.Hash)
+						txsToRemove = append(txsToRemove, tx)
+						continue
+					}
+					var multiErr error
+					for i, addrBytes := range signers {
+						addrStr := sdk.AccAddress(addrBytes).String()
+						if verifyErr := h.fastNonceVerifier(ctx, addrStr, sigs[i].Sequence); verifyErr != nil {
+							multiErr = verifyErr
+							h.lane.Logger().Info(
+								"failed fast nonce verify (multi signer)",
+								"tx_hash", txInfo.Hash,
+								"signer", addrStr,
+								"err", verifyErr,
+							)
+							break
+						}
+					}
+					if multiErr != nil {
+						accVerifyUs += time.Since(tVerify).Microseconds()
+						txsToRemove = append(txsToRemove, tx)
+						continue
+					}
+				}
+			} else {
+				// No FastNonceVerifier configured: fall back to full ante handler.
+				if err = h.lane.VerifyTx(ctx, tx, false); err != nil {
+					accVerifyUs += time.Since(tVerify).Microseconds()
+					h.lane.Logger().Info(
+						"failed to verify tx",
+						"tx_hash", txInfo.Hash,
+						"err", err,
+					)
+					txsToRemove = append(txsToRemove, tx)
+					continue
+				}
 			}
 			accVerifyUs += time.Since(tVerify).Microseconds()
 
