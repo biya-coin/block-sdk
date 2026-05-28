@@ -17,6 +17,11 @@ type senderInfoGetter interface {
 	SenderInfo() (sender string, nonce uint64)
 }
 
+// FastNonceFlushSender is a sentinel sender value passed to FastNonceVerifier
+// to trigger a batch flush: the verifier writes all cached account state to the
+// store and clears its internal cache. The nonce argument is ignored.
+const FastNonceFlushSender = "\x00flush\x00"
+
 // FastNonceVerifier is an optional callback for single-signer transactions.
 // It should atomically verify that `sender`'s current sequence equals `nonce`,
 // then increment the sequence in the cached context state.
@@ -75,6 +80,12 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 
 		minRemainingSizeToContinue := limit.MaxTxBytes / 1000
 		minRemainingGasToContinue := limit.MaxGasLimit / 1000
+
+		// Flush any cached account writes (from FastNonceVerifier) when the lane
+		// handler returns, regardless of whether it exits normally or via break.
+		if h.fastNonceVerifier != nil {
+			defer func() { _ = h.fastNonceVerifier(ctx, FastNonceFlushSender, 0) }()
+		}
 
 		// Select all transactions in the mempool that are valid and not already in the
 		// partial proposal.
