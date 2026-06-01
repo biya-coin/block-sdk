@@ -65,6 +65,7 @@ func (h *DefaultProposalHandler) WithFastNonceVerifier(fn FastNonceVerifier) *De
 // lane has been reached. Additionally, any transactions that are invalid will be returned.
 func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 	return func(ctx sdk.Context, proposal proposals.Proposal, limit proposals.LaneLimits) ([]sdk.Tx, []utils.TxWithInfo, []sdk.Tx, error) {
+		t0 := time.Now()
 		var (
 			totalSize      int64
 			totalGas       uint64
@@ -77,24 +78,60 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 		// TODO(max): rewrite debugging to use LazyHash once this commit is available as part of cometbftv1 migration:
 		// https://github.com/cometbft/cometbft/commit/fad150950f1b6095b89e140e1286de027fe9778f
 
-		// Accumulated timing (microseconds) per block for lane_sim_timing log.
+		// Accumulated timing (microseconds) per block for lane_sim Prometheus metrics.
 		var (
-			accSelectUs  int64
-			accTxInfoUs  int64
-			accVerifyUs  int64
-			accNextUs    int64
-			accLoggingUs int64
-			iterCount    int64
+			accSelectUs           int64
+			accTxUs               int64
+			accSenderInfoUs       int64
+			accSkippedSenderUs    int64
+			accTxInfoUs           int64
+			accLimitsUs           int64
+			accMatchUs            int64
+			accProposalContainsUs int64
+			accVerifyUs           int64
+			accIncludeUs          int64
+			accNextUs             int64
+			accLoggingUs          int64
+			accFlushUs            int64
+			iterCount             int64
 		)
 
 		minRemainingSizeToContinue := limit.MaxTxBytes / 1000
 		minRemainingGasToContinue := limit.MaxGasLimit / 1000
 
-		// Flush any cached account writes (from FastNonceVerifier) when the lane
-		// handler returns, regardless of whether it exits normally or via break.
-		if h.fastNonceVerifier != nil {
-			defer func() { _, _ = h.fastNonceVerifier(ctx, FastNonceFlushSender, 0) }()
-		}
+		defer func() {
+			if h.fastNonceVerifier != nil {
+				tFlush := time.Now()
+				_, _ = h.fastNonceVerifier(ctx, FastNonceFlushSender, 0)
+				accFlushUs += time.Since(tFlush).Microseconds()
+			}
+
+			if h.lane.Name() != "exchange" {
+				return
+			}
+
+			totalUs := time.Since(t0).Microseconds()
+			accountedUs := accSelectUs + accTxUs + accSenderInfoUs + accSkippedSenderUs + accTxInfoUs + accLimitsUs + accMatchUs + accProposalContainsUs + accVerifyUs + accIncludeUs + accNextUs + accLoggingUs + accFlushUs
+			otherUs := totalUs - accountedUs
+			if otherUs < 0 {
+				otherUs = 0
+			}
+
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "select").Observe(float64(accSelectUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "tx").Observe(float64(accTxUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "sender_info").Observe(float64(accSenderInfoUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "skipped_sender").Observe(float64(accSkippedSenderUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "tx_info").Observe(float64(accTxInfoUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "limits").Observe(float64(accLimitsUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "match").Observe(float64(accMatchUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "proposal_contains").Observe(float64(accProposalContainsUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "verify").Observe(float64(accVerifyUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "include").Observe(float64(accIncludeUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "next").Observe(float64(accNextUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "logging").Observe(float64(accLoggingUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "flush").Observe(float64(accFlushUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "other").Observe(float64(otherUs) / 1e6)
+		}()
 
 		// Select all transactions in the mempool that are valid and not already in the
 		// partial proposal.
@@ -107,14 +144,18 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			iterator = iterator.Next()
 			accNextUs += time.Since(tNext).Microseconds()
 		}() {
+			tTx := time.Now()
 			tx := iterator.Tx()
+			accTxUs += time.Since(tTx).Microseconds()
 
 			// Get sender and nonce from the mempool index key (set at Insert time from signers[0]).
+			tSenderInfo := time.Now()
 			var senderStr string
 			var senderNonce uint64
 			if sig, ok := iterator.(senderInfoGetter); ok {
 				senderStr, senderNonce = sig.SenderInfo()
 			}
+			accSenderInfoUs += time.Since(tSenderInfo).Microseconds()
 
 			iterCount++
 			tInfo := time.Now()
@@ -132,21 +173,28 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 
 			// If the transaction is from a skipped sender, we skip it altogether. Allows to avoid sequence error when
 			// first skipped tx is not included in the proposal.
+			tSkippedSender := time.Now()
+			isSkippedSender := false
 			if senderStr != "" {
-				if _, ok := skippedSenders[senderStr]; ok {
-					tLog := time.Now()
-					h.lane.Logger().Debug(
-						"failed to select tx for lane; tx from skipped sender",
-						"tx_hash", txInfo.Hash,
-						"lane", h.lane.Name(),
-					)
-					accLoggingUs += time.Since(tLog).Microseconds()
+				_, isSkippedSender = skippedSenders[senderStr]
+			}
+			accSkippedSenderUs += time.Since(tSkippedSender).Microseconds()
+			if isSkippedSender {
+				tLog := time.Now()
+				h.lane.Logger().Debug(
+					"failed to select tx for lane; tx from skipped sender",
+					"tx_hash", txInfo.Hash,
+					"lane", h.lane.Name(),
+				)
+				accLoggingUs += time.Since(tLog).Microseconds()
 
-					continue
-				}
+				continue
 			}
 
-			if txInfo.GasLimit > limit.MaxGasLimit {
+			tLimits := time.Now()
+			gasLimitExceeded := txInfo.GasLimit > limit.MaxGasLimit
+			accLimitsUs += time.Since(tLimits).Microseconds()
+			if gasLimitExceeded {
 				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; gas limit above the maximum allowed",
@@ -161,7 +209,10 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 				continue
 			}
 
-			if txInfo.Size > limit.MaxTxBytes {
+			tLimits = time.Now()
+			txSizeExceeded := txInfo.Size > limit.MaxTxBytes
+			accLimitsUs += time.Since(tLimits).Microseconds()
+			if txSizeExceeded {
 				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx bytes above the maximum allowed",
@@ -177,7 +228,10 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			}
 
 			// Double check that the transaction belongs to this lane.
-			if !h.lane.Match(ctx, tx) {
+			tMatch := time.Now()
+			matchesLane := h.lane.Match(ctx, tx)
+			accMatchUs += time.Since(tMatch).Microseconds()
+			if !matchesLane {
 				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx does not belong to lane",
@@ -191,7 +245,10 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			}
 
 			// if the transaction is already in the (partial) block proposal, we skip it.
-			if proposal.Contains(txInfo.Hash) {
+			tProposalContains := time.Now()
+			alreadyInProposal := proposal.Contains(txInfo.Hash)
+			accProposalContainsUs += time.Since(tProposalContains).Microseconds()
+			if alreadyInProposal {
 				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx is already in proposal",
@@ -205,7 +262,11 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 
 			// If the transaction is too large, we skip it,
 			// but also have to prevent anything from the same sender from being included during this iteration.
-			if updatedSize := totalSize + txInfo.Size; updatedSize > limit.MaxTxBytes {
+			tLimits = time.Now()
+			updatedSize := totalSize + txInfo.Size
+			updatedSizeExceeded := updatedSize > limit.MaxTxBytes
+			accLimitsUs += time.Since(tLimits).Microseconds()
+			if updatedSizeExceeded {
 				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; tx bytes above the maximum allowed",
@@ -243,7 +304,11 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 
 			// If the gas limit of the transaction is too large, we skip it,
 			// but also have to prevent anything from the same sender from being included during this iteration.
-			if updatedGas := totalGas + txInfo.GasLimit; updatedGas > limit.MaxGasLimit {
+			tLimits = time.Now()
+			updatedGas := totalGas + txInfo.GasLimit
+			updatedGasExceeded := updatedGas > limit.MaxGasLimit
+			accLimitsUs += time.Since(tLimits).Microseconds()
+			if updatedGasExceeded {
 				tLog := time.Now()
 				h.lane.Logger().Debug(
 					"failed to select tx for lane; gas limit above the maximum allowed",
@@ -328,11 +393,21 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					if cmp != 0 {
 						accVerifyUs += time.Since(tVerify).Microseconds()
 						if cmp > 0 {
-							// future tx: gap in nonces, all following txs from this sender are also future.
+							// future tx: nonce > expected, gap exists. Since senderIndex is
+							// ascending, all subsequent txs from this sender have even higher
+							// nonces — skip the entire sender for this block.
 							if senderStr != "" {
 								skippedSenders[senderStr] = struct{}{}
 							}
 						} else {
+							// stale tx: nonce < expected, already committed on-chain.
+							// Will never be valid again — remove from mempool.
+							h.lane.Logger().Debug(
+								"removing stale tx from mempool",
+								"tx_hash", txInfo.Hash,
+								"sender", senderStr,
+								"nonce", senderNonce,
+							)
 							txsToRemove = append(txsToRemove, tx)
 						}
 						continue
@@ -394,21 +469,13 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			}
 			accVerifyUs += time.Since(tVerify).Microseconds()
 
+			tInclude := time.Now()
 			totalSize += txInfo.Size
 			totalGas += txInfo.GasLimit
 			txsToInclude = append(txsToInclude, tx)
 			// Carry the already-computed TxWithInfo so the caller avoids a second GetTxInfo call.
 			txsWithInfo = append(txsWithInfo, txInfo)
-		}
-
-		if h.lane.Name() == "exchange" {
-			fmt.Printf("msg=lane_sim_timing lane=%s iter_count=%d select_us=%d tx_info_us=%d verify_us=%d next_us=%d logging_us=%d\n",
-				h.lane.Name(), iterCount, accSelectUs, accTxInfoUs, accVerifyUs, accNextUs, accLoggingUs)
-			LaneSimSeconds.WithLabelValues(h.lane.Name(), "select").Observe(float64(accSelectUs) / 1e6)
-			LaneSimSeconds.WithLabelValues(h.lane.Name(), "tx_info").Observe(float64(accTxInfoUs) / 1e6)
-			LaneSimSeconds.WithLabelValues(h.lane.Name(), "verify").Observe(float64(accVerifyUs) / 1e6)
-			LaneSimSeconds.WithLabelValues(h.lane.Name(), "next").Observe(float64(accNextUs) / 1e6)
-			LaneSimSeconds.WithLabelValues(h.lane.Name(), "logging").Observe(float64(accLoggingUs) / 1e6)
+			accIncludeUs += time.Since(tInclude).Microseconds()
 		}
 
 		return txsToInclude, txsWithInfo, txsToRemove, nil

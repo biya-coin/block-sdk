@@ -19,12 +19,13 @@ var (
 	}, []string{"lane", "step"}) // step: handler / get_info / update
 
 	// LaneSimSeconds 记录 DefaultPrepareLaneHandler 内部每个子步骤的累计耗时（秒）。
-	// label "step": select / tx_info / verify / next / logging
+	// label "step": total / select / tx / sender_info / skipped_sender / tx_info /
+	// limits / match / proposal_contains / verify / include / next / logging / flush / other
 	LaneSimSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace,
 		Subsystem: "proposal",
 		Name:      "lane_sim_seconds",
 		Help:      "Per-block cumulative time for each sub-step inside PrepareLaneHandler.",
 		Buckets:   []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1},
-	}, []string{"lane", "step"}) // step: select / tx_info / verify / next / logging
+	}, []string{"lane", "step"})
 )
