@@ -28,8 +28,7 @@ var (
 	}, []string{"lane"})
 
 	// LaneSimSeconds 记录 DefaultPrepareLaneHandler 内部每个子步骤的累计耗时（秒）。
-	// label "step": select / tx / sender_info / skipped_sender / tx_info /
-	// limits / match / proposal_contains / verify / include / next / logging / flush / overhead / other
+	// label "step": select / tx / sender_info / tx_info / precheck / verify / include / next / flush / other
 	LaneSimSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace,
 		Subsystem: "proposal",
