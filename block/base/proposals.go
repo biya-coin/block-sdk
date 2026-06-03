@@ -111,8 +111,13 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			}
 
 			totalUs := time.Since(t0).Microseconds()
+			LanePrepareTotalSeconds.WithLabelValues(h.lane.Name()).Observe(float64(totalUs) / 1e6)
 			accountedUs := accSelectUs + accTxUs + accSenderInfoUs + accSkippedSenderUs + accTxInfoUs + accLimitsUs + accMatchUs + accProposalContainsUs + accVerifyUs + accIncludeUs + accNextUs + accLoggingUs + accFlushUs
-			otherUs := totalUs - accountedUs
+			overheadUs := totalUs - accountedUs
+			if overheadUs < 0 {
+				overheadUs = 0
+			}
+			otherUs := totalUs - accountedUs - overheadUs
 			if otherUs < 0 {
 				otherUs = 0
 			}
@@ -130,6 +135,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			LaneSimSeconds.WithLabelValues(h.lane.Name(), "next").Observe(float64(accNextUs) / 1e6)
 			LaneSimSeconds.WithLabelValues(h.lane.Name(), "logging").Observe(float64(accLoggingUs) / 1e6)
 			LaneSimSeconds.WithLabelValues(h.lane.Name(), "flush").Observe(float64(accFlushUs) / 1e6)
+			LaneSimSeconds.WithLabelValues(h.lane.Name(), "overhead").Observe(float64(overheadUs) / 1e6)
 			LaneSimSeconds.WithLabelValues(h.lane.Name(), "other").Observe(float64(otherUs) / 1e6)
 		}()
 
