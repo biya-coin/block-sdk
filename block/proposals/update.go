@@ -2,6 +2,7 @@ package proposals
 
 import (
 	"fmt"
+	"time"
 
 	"cosmossdk.io/math"
 
@@ -40,17 +41,8 @@ func (p *Proposal) UpdateProposal(lane Lane, partialProposal []utils.TxWithInfo)
 	partialProposalSize := int64(0)
 	partialProposalGasLimit := uint64(0)
 
+	aggregateLoopStart := time.Now()
 	for index, tx := range partialProposal {
-		p.Logger.Debug(
-			"updating proposal with tx",
-			"index", index+len(p.Txs),
-			"lane", lane.Name(),
-			"hash", tx.Hash,
-			"size", tx.Size,
-			"gas_limit", tx.GasLimit,
-			"signers", tx.Signers,
-			"priority", tx.Priority,
-		)
 
 		// invariant check: Ensure that the transaction is not already in the proposal.
 		if _, ok := p.Cache[tx.Hash]; ok {
@@ -62,6 +54,8 @@ func (p *Proposal) UpdateProposal(lane Lane, partialProposal []utils.TxWithInfo)
 		partialProposalGasLimit += tx.GasLimit
 		txs[index] = tx.TxBytes
 	}
+	aggregateLoopMs := float64(time.Since(aggregateLoopStart).Nanoseconds()) / 1e6
+	UpdateProposalStepSeconds.WithLabelValues(lane.Name(), "aggregate_loop").Observe(aggregateLoopMs / 1000)
 
 	// invariant check: Ensure that the partial proposal is not too large.
 	limit := p.GetLaneLimits(lane.GetMaxBlockSpace())
@@ -111,9 +105,12 @@ func (p *Proposal) UpdateProposal(lane Lane, partialProposal []utils.TxWithInfo)
 
 	// Update the proposal.
 	p.Txs = append(p.Txs, txs...)
+	cacheLoopStart := time.Now()
 	for hash := range hashes {
 		p.Cache[hash] = struct{}{}
 	}
+	cacheLoopMs := float64(time.Since(cacheLoopStart).Nanoseconds()) / 1e6
+	UpdateProposalStepSeconds.WithLabelValues(lane.Name(), "cache_loop").Observe(cacheLoopMs / 1000)
 
 	return nil
 }

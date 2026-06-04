@@ -28,7 +28,7 @@ func (l *BaseLane) PrepareLane(
 
 	t1 := time.Now()
 	txsToInclude, cachedTxsWithInfo, txsToRemove, err := l.prepareLaneHandler(ctx, proposal, limit)
-	prepareUs := time.Since(t1).Microseconds()
+	prepareNs := time.Since(t1).Nanoseconds()
 	if err != nil {
 		l.Logger().Error(
 			"failed to prepare lane",
@@ -71,25 +71,25 @@ func (l *BaseLane) PrepareLane(
 		}
 		txsWithInfo[i] = txInfo
 	}
-	infoUs := time.Since(t3).Microseconds()
+	infoNs := time.Since(t3).Nanoseconds()
 
 	// Update the proposal with the selected transactions. This fails if the lane attempted to add
 	// more transactions than the allocated max block space for the lane.
 	t4 := time.Now()
 	errUpdate := proposal.UpdateProposal(l, txsWithInfo)
-	updateUs := time.Since(t4).Microseconds()
+	updateNs := time.Since(t4).Nanoseconds()
 
-	totalLaneMs := float64(prepareUs+infoUs+updateUs) / 1e3
+	totalLaneMs := float64(prepareNs+infoNs+updateNs) / 1e6
 	fmt.Printf("msg=prepare_lane_timing lane=%s total_ms=%.3f prepare_handler_ms=%.3f get_info_ms=%.3f update_ms=%.3f include_count=%d\n",
 		l.Name(), totalLaneMs,
-		float64(prepareUs)/1e3,
-		float64(infoUs)/1e3,
-		float64(updateUs)/1e3,
+		float64(prepareNs)/1e6,
+		float64(infoNs)/1e6,
+		float64(updateNs)/1e6,
 		len(txsToInclude),
 	)
-	PrepareLaneSeconds.WithLabelValues(l.Name(), "handler").Observe(float64(prepareUs) / 1e6)
-	PrepareLaneSeconds.WithLabelValues(l.Name(), "get_info").Observe(float64(infoUs) / 1e6)
-	PrepareLaneSeconds.WithLabelValues(l.Name(), "update").Observe(float64(updateUs) / 1e6)
+	PrepareLaneSeconds.WithLabelValues(l.Name(), "handler").Observe(float64(prepareNs) / 1e9)
+	PrepareLaneSeconds.WithLabelValues(l.Name(), "get_info").Observe(float64(infoNs) / 1e9)
+	PrepareLaneSeconds.WithLabelValues(l.Name(), "update").Observe(float64(updateNs) / 1e9)
 
 	if errUpdate != nil {
 		l.Logger().Error(
