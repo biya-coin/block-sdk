@@ -28,8 +28,7 @@ type exchangeCandidate struct {
 }
 
 // FastNonceFlushSender is a sentinel sender value passed to FastNonceVerifier
-// to trigger a batch flush: the verifier writes all cached account state to the
-// store and clears its internal cache. The nonce argument is ignored.
+// to clear the verifier's internal cache. The nonce argument is ignored.
 const FastNonceFlushSender = "\x00flush\x00"
 
 const tx_num = 10000
@@ -76,9 +75,10 @@ func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
 	candidates []exchangeCandidate,
 ) []sdk.Tx {
 	type txInfoResult struct {
-		index int
-		info  utils.TxWithInfo
-		err   error
+		index   int
+		info    utils.TxWithInfo
+		matches bool
+		err     error
 	}
 
 	jobs := make(chan int)
@@ -95,10 +95,15 @@ func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
 			defer wg.Done()
 			for index := range jobs {
 				txInfo, err := h.lane.GetTxInfoLight(ctx, candidates[index].tx)
+				matches := false
+				if err == nil {
+					matches = h.lane.Match(ctx, candidates[index].tx)
+				}
 				results <- txInfoResult{
-					index: index,
-					info:  txInfo,
-					err:   err,
+					index:   index,
+					info:    txInfo,
+					matches: matches,
+					err:     err,
 				}
 			}
 		}()
@@ -120,6 +125,15 @@ func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
 		}
 		result.info.Sender = candidates[result.index].sender
 		result.info.Nonce = candidates[result.index].nonce
+		if !result.matches {
+			h.lane.Logger().Debug(
+				"failed to select tx for lane; tx does not belong to lane",
+				"tx_hash", utils.TxHash(result.info.TxBytes),
+				"lane", h.lane.Name(),
+			)
+			txsToRemove = append(txsToRemove, candidates[result.index].tx)
+			continue
+		}
 		candidates[result.index].txInfo = result.info
 		candidates[result.index].hasTxInfo = true
 	}
@@ -148,9 +162,8 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 		// Each variable corresponds to one labelled step emitted in the defer below.
 		var (
 			accSenderInfoNs     int64 // extract sender/nonce from iterator key
-			accTxInfoNs         int64 // GetTxInfoLight
+			accTxInfoNs         int64 // GetTxInfoLight + lane match
 			accSkippedSenderNs  int64 // lookup + hit-branch for skipped senders
-			accLaneMatchNs      int64 // h.lane.Match
 			accVerifySigParseNs int64 // GetSignaturesV2 / GetSigners (inside verify path)
 			accVerifySingleNs   int64 // fastNonceVerifier single-signer call
 			accIterTxNs         int64 // iterator.Tx()
@@ -189,7 +202,6 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 			obs("sender_info", accSenderInfoNs)
 			obs("tx_info", accTxInfoNs)
 			obs("skipped_sender", accSkippedSenderNs)
-			obs("lane_match", accLaneMatchNs)
 			obs("verify_sig_parse", accVerifySigParseNs)
 			obs("verify_single", accVerifySingleNs)
 			obs("include", accIncludeNs)
@@ -198,7 +210,6 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 
 			accountedNs := accIterTxNs + accSenderInfoNs + accTxInfoNs +
 				accSkippedSenderNs +
-				accLaneMatchNs +
 				accVerifySigParseNs + accVerifySingleNs +
 				accIncludeNs + accNextNs + accFlushNs
 			otherNs := totalNs - accountedNs
@@ -272,21 +283,6 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 					continue
 				}
 				accSkippedSenderNs += time.Since(tSkip).Nanoseconds()
-
-				// ── lane_match ────────────────────────────────────────────────────────
-				// Double check that the transaction belongs to this lane.
-				tMatch := time.Now()
-				if !h.lane.Match(ctx, tx) {
-					h.lane.Logger().Debug(
-						"failed to select tx for lane; tx does not belong to lane",
-						"tx_hash", utils.TxHash(txInfo.TxBytes),
-						"lane", h.lane.Name(),
-					)
-					accLaneMatchNs += time.Since(tMatch).Nanoseconds()
-					txsToRemove = append(txsToRemove, tx)
-					continue
-				}
-				accLaneMatchNs += time.Since(tMatch).Nanoseconds()
 
 				// ── already_in_proposal ───────────────────────────────────────────────
 				// If the transaction is already in the (partial) block proposal, we skip it.
