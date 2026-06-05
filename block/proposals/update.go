@@ -2,7 +2,6 @@ package proposals
 
 import (
 	"fmt"
-	"time"
 
 	"cosmossdk.io/math"
 
@@ -36,26 +35,24 @@ func (p *Proposal) UpdateProposal(lane Lane, partialProposal []utils.TxWithInfo)
 	}
 
 	// Aggregate info from the transactions.
-	hashes := make(map[string]struct{})
+	txKeys := make(map[string]struct{})
 	txs := make([][]byte, len(partialProposal))
 	partialProposalSize := int64(0)
 	partialProposalGasLimit := uint64(0)
 
-	aggregateLoopStart := time.Now()
 	for index, tx := range partialProposal {
+		txKey := tx.Key()
 
 		// invariant check: Ensure that the transaction is not already in the proposal.
-		if _, ok := p.Cache[tx.Hash]; ok {
-			return fmt.Errorf("transaction %s is already in the proposal", tx.Hash)
+		if _, ok := p.Cache[txKey]; ok {
+			return fmt.Errorf("transaction %s is already in the proposal", txKey)
 		}
 
-		hashes[tx.Hash] = struct{}{}
+		txKeys[txKey] = struct{}{}
 		partialProposalSize += tx.Size
 		partialProposalGasLimit += tx.GasLimit
 		txs[index] = tx.TxBytes
 	}
-	aggregateLoopMs := float64(time.Since(aggregateLoopStart).Nanoseconds()) / 1e6
-	UpdateProposalStepSeconds.WithLabelValues(lane.Name(), "aggregate_loop").Observe(aggregateLoopMs / 1000)
 
 	// invariant check: Ensure that the partial proposal is not too large.
 	limit := p.GetLaneLimits(lane.GetMaxBlockSpace())
@@ -105,12 +102,9 @@ func (p *Proposal) UpdateProposal(lane Lane, partialProposal []utils.TxWithInfo)
 
 	// Update the proposal.
 	p.Txs = append(p.Txs, txs...)
-	cacheLoopStart := time.Now()
-	for hash := range hashes {
-		p.Cache[hash] = struct{}{}
+	for txKey := range txKeys {
+		p.Cache[txKey] = struct{}{}
 	}
-	cacheLoopMs := float64(time.Since(cacheLoopStart).Nanoseconds()) / 1e6
-	UpdateProposalStepSeconds.WithLabelValues(lane.Name(), "cache_loop").Observe(cacheLoopMs / 1000)
 
 	return nil
 }

@@ -15,8 +15,10 @@ import (
 // TxWithInfo contains the information required for a transaction to be
 // included in a proposal.
 type TxWithInfo struct {
-	// Hash is the hex-encoded hash of the transaction.
-	Hash string
+	// Sender is the primary signer used to identify the transaction in proposal caches.
+	Sender string
+	// Nonce is the sender account sequence used to identify the transaction in proposal caches.
+	Nonce uint64
 	// Size is the size of the transaction in bytes.
 	Size int64
 	// GasLimit is the gas limit of the transaction.
@@ -31,7 +33,8 @@ type TxWithInfo struct {
 
 // NewTxInfo returns a new TxInfo instance.
 func NewTxInfo(
-	hash string,
+	sender string,
+	nonce uint64,
 	size int64,
 	gasLimit uint64,
 	txBytes []byte,
@@ -39,7 +42,8 @@ func NewTxInfo(
 	signers []signerextraction.SignerData,
 ) TxWithInfo {
 	return TxWithInfo{
-		Hash:     hash,
+		Sender:   sender,
+		Nonce:    nonce,
 		Size:     size,
 		GasLimit: gasLimit,
 		TxBytes:  txBytes,
@@ -48,10 +52,15 @@ func NewTxInfo(
 	}
 }
 
+// Key returns the proposal-cache identity for this transaction.
+func (t TxWithInfo) Key() string {
+	return fmt.Sprintf("%s/%d", t.Sender, t.Nonce)
+}
+
 // String implements the fmt.Stringer interface.
 func (t TxWithInfo) String() string {
-	return fmt.Sprintf("TxWithInfo{Hash: %s, Size: %d, GasLimit: %d, Priority: %s, Signers: %v}",
-		t.Hash, t.Size, t.GasLimit, t.Priority, t.Signers)
+	return fmt.Sprintf("TxWithInfo{Sender: %s, Nonce: %d, Size: %d, GasLimit: %d, Priority: %s, Signers: %v}",
+		t.Sender, t.Nonce, t.Size, t.GasLimit, t.Priority, t.Signers)
 }
 
 // GetTxHash returns the string hash representation of a transaction.
