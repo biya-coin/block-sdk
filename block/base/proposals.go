@@ -2,6 +2,8 @@ package base
 
 import (
 	"fmt"
+	"runtime"
+	"sync"
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -17,10 +19,20 @@ type senderInfoGetter interface {
 	SenderInfo() (sender string, nonce uint64)
 }
 
+type exchangeCandidate struct {
+	tx        sdk.Tx
+	txInfo    utils.TxWithInfo
+	sender    string
+	nonce     uint64
+	hasTxInfo bool
+}
+
 // FastNonceFlushSender is a sentinel sender value passed to FastNonceVerifier
 // to trigger a batch flush: the verifier writes all cached account state to the
 // store and clears its internal cache. The nonce argument is ignored.
 const FastNonceFlushSender = "\x00flush\x00"
+
+const tx_num = 10000
 
 // FastNonceVerifier is an optional callback for single-signer transactions.
 // It verifies that `sender`'s current sequence matches `nonce` and increments
@@ -59,12 +71,70 @@ func (h *DefaultProposalHandler) WithFastNonceVerifier(fn FastNonceVerifier) *De
 	return h
 }
 
+func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
+	ctx sdk.Context,
+	candidates []exchangeCandidate,
+) []sdk.Tx {
+	type txInfoResult struct {
+		index int
+		info  utils.TxWithInfo
+		err   error
+	}
+
+	jobs := make(chan int)
+	results := make(chan txInfoResult, len(candidates))
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				txInfo, err := h.lane.GetTxInfoLight(ctx, candidates[index].tx)
+				results <- txInfoResult{
+					index: index,
+					info:  txInfo,
+					err:   err,
+				}
+			}
+		}()
+	}
+
+	for i := range candidates {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	var txsToRemove []sdk.Tx
+	for result := range results {
+		if result.err != nil {
+			h.lane.Logger().Info("failed to get tx info", "err", result.err)
+			txsToRemove = append(txsToRemove, candidates[result.index].tx)
+			continue
+		}
+		result.info.Sender = candidates[result.index].sender
+		result.info.Nonce = candidates[result.index].nonce
+		candidates[result.index].txInfo = result.info
+		candidates[result.index].hasTxInfo = true
+	}
+
+	return txsToRemove
+}
+
 func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler {
 	return func(ctx sdk.Context, proposal proposals.Proposal, limit proposals.LaneLimits) ([]sdk.Tx, []utils.TxWithInfo, []sdk.Tx, error) {
+		if h.fastNonceVerifier == nil {
+			return nil, nil, nil, fmt.Errorf("exchange lane requires FastNonceVerifier")
+		}
+
 		t0 := time.Now()
 		var (
-			totalSize      int64
-			totalGas       uint64
 			txsToInclude   []sdk.Tx
 			txsWithInfo    []utils.TxWithInfo
 			txsToRemove    []sdk.Tx
@@ -89,8 +159,7 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 			accFlushNs          int64 // fastNonceVerifier flush sentinel
 		)
 
-		minRemainingSizeToContinue := limit.MaxTxBytes / 1000
-		minRemainingGasToContinue := limit.MaxGasLimit / 1000
+		_ = limit
 
 		markSkippedSender := func(sender string) {
 			if sender == "" {
@@ -143,171 +212,96 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 		// partial proposal.
 		iterator := h.lane.Select(ctx, nil)
 
-		for ; iterator != nil; func() {
-			tNext := time.Now()
-			iterator = iterator.Next()
-			accNextNs += time.Since(tNext).Nanoseconds()
-		}() {
-			tIterTx := time.Now()
-			tx := iterator.Tx()
-			accIterTxNs += time.Since(tIterTx).Nanoseconds()
+		for iterator != nil && len(txsToInclude) < tx_num {
+			remainingTxs := tx_num - len(txsToInclude)
+			candidates := make([]exchangeCandidate, 0, remainingTxs)
 
-			// ── sender_info ──────────────────────────────────────────────────────────
-			// Get sender and nonce from the mempool index key (set at Insert time from signers[0]).
-			tSender := time.Now()
-			var senderStr string
-			var senderNonce uint64
-			if sig, ok := iterator.(senderInfoGetter); ok {
-				senderStr, senderNonce = sig.SenderInfo()
+			for i := 0; i < remainingTxs && iterator != nil; i++ {
+				tIterTx := time.Now()
+				tx := iterator.Tx()
+				accIterTxNs += time.Since(tIterTx).Nanoseconds()
+
+				// ── sender_info ──────────────────────────────────────────────────────────
+				// Get sender and nonce from the mempool index key (set at Insert time from signers[0]).
+				tSender := time.Now()
+				var senderStr string
+				var senderNonce uint64
+				if sig, ok := iterator.(senderInfoGetter); ok {
+					senderStr, senderNonce = sig.SenderInfo()
+				}
+				accSenderInfoNs += time.Since(tSender).Nanoseconds()
+
+				candidates = append(candidates, exchangeCandidate{
+					tx:     tx,
+					sender: senderStr,
+					nonce:  senderNonce,
+				})
+
+				tNext := time.Now()
+				iterator = iterator.Next()
+				accNextNs += time.Since(tNext).Nanoseconds()
 			}
-			accSenderInfoNs += time.Since(tSender).Nanoseconds()
 
-			// ── tx_info ──────────────────────────────────────────────────────────────
-			tInfo := time.Now()
-			txInfo, err := h.lane.GetTxInfoLight(ctx, tx)
-			accTxInfoNs += time.Since(tInfo).Nanoseconds()
-			if err != nil {
-				h.lane.Logger().Info("failed to get tx info", "err", err)
-				txsToRemove = append(txsToRemove, tx)
-				continue
-			}
-			txInfo.Sender = senderStr
-			txInfo.Nonce = senderNonce
+			tTxInfo := time.Now()
+			txInfoFailures := h.fillExchangeCandidateTxInfo(ctx, candidates)
+			accTxInfoNs += time.Since(tTxInfo).Nanoseconds()
+			txsToRemove = append(txsToRemove, txInfoFailures...)
 
-			// ── skipped_sender ────────────────────────────────────────────────────
-			// If the transaction is from a skipped sender, we skip it altogether. Allows to avoid sequence error when
-			// first skipped tx is not included in the proposal.
-			tSkip := time.Now()
-			isSkippedSender := senderStr != "" && func() bool { _, ok := skippedSenders[senderStr]; return ok }()
-			if isSkippedSender {
-				h.lane.Logger().Debug(
-					"failed to select tx for lane; tx from skipped sender",
-					"tx_hash", utils.TxHash(txInfo.TxBytes),
-					"lane", h.lane.Name(),
-				)
+			for _, candidate := range candidates {
+				if !candidate.hasTxInfo {
+					continue
+				}
+
+				tx := candidate.tx
+				txInfo := candidate.txInfo
+				senderStr := candidate.sender
+				senderNonce := candidate.nonce
+
+				// ── skipped_sender ────────────────────────────────────────────────────
+				// If the transaction is from a skipped sender, we skip it altogether. Allows to avoid sequence error when
+				// first skipped tx is not included in the proposal.
+				tSkip := time.Now()
+				isSkippedSender := senderStr != "" && func() bool { _, ok := skippedSenders[senderStr]; return ok }()
+				if isSkippedSender {
+					h.lane.Logger().Debug(
+						"failed to select tx for lane; tx from skipped sender",
+						"tx_hash", utils.TxHash(txInfo.TxBytes),
+						"lane", h.lane.Name(),
+					)
+					accSkippedSenderNs += time.Since(tSkip).Nanoseconds()
+					continue
+				}
 				accSkippedSenderNs += time.Since(tSkip).Nanoseconds()
-				continue
-			}
-			accSkippedSenderNs += time.Since(tSkip).Nanoseconds()
 
-			// ── gas_limit ─────────────────────────────────────────────────────────
-			// Reject single-tx gas that can never fit regardless of accumulated totals.
-			if txInfo.GasLimit > limit.MaxGasLimit {
-				h.lane.Logger().Debug(
-					"failed to select tx for lane; gas limit above the maximum allowed",
-					"lane", h.lane.Name(),
-					"tx_gas", txInfo.GasLimit,
-					"max_gas", limit.MaxGasLimit,
-					"tx_hash", utils.TxHash(txInfo.TxBytes),
-				)
-				txsToRemove = append(txsToRemove, tx)
-				continue
-			}
-
-			// ── tx_size ───────────────────────────────────────────────────────────
-			// Reject single-tx size that can never fit regardless of accumulated totals.
-			if txInfo.Size > limit.MaxTxBytes {
-				h.lane.Logger().Debug(
-					"failed to select tx for lane; tx bytes above the maximum allowed",
-					"lane", h.lane.Name(),
-					"tx_size", txInfo.Size,
-					"max_tx_bytes", limit.MaxTxBytes,
-					"tx_hash", utils.TxHash(txInfo.TxBytes),
-				)
-				txsToRemove = append(txsToRemove, tx)
-				continue
-			}
-
-			// ── lane_match ────────────────────────────────────────────────────────
-			// Double check that the transaction belongs to this lane.
-			tMatch := time.Now()
-			if !h.lane.Match(ctx, tx) {
-				h.lane.Logger().Debug(
-					"failed to select tx for lane; tx does not belong to lane",
-					"tx_hash", utils.TxHash(txInfo.TxBytes),
-					"lane", h.lane.Name(),
-				)
+				// ── lane_match ────────────────────────────────────────────────────────
+				// Double check that the transaction belongs to this lane.
+				tMatch := time.Now()
+				if !h.lane.Match(ctx, tx) {
+					h.lane.Logger().Debug(
+						"failed to select tx for lane; tx does not belong to lane",
+						"tx_hash", utils.TxHash(txInfo.TxBytes),
+						"lane", h.lane.Name(),
+					)
+					accLaneMatchNs += time.Since(tMatch).Nanoseconds()
+					txsToRemove = append(txsToRemove, tx)
+					continue
+				}
 				accLaneMatchNs += time.Since(tMatch).Nanoseconds()
-				txsToRemove = append(txsToRemove, tx)
-				continue
-			}
-			accLaneMatchNs += time.Since(tMatch).Nanoseconds()
 
-			// ── already_in_proposal ───────────────────────────────────────────────
-			// If the transaction is already in the (partial) block proposal, we skip it.
-			if proposal.Contains(txInfo.Key()) {
-				h.lane.Logger().Debug(
-					"failed to select tx for lane; tx is already in proposal",
-					"tx_hash", utils.TxHash(txInfo.TxBytes),
-					"lane", h.lane.Name(),
-				)
-				continue
-			}
-
-			// ── updated_size ──────────────────────────────────────────────────────
-			// If the transaction is too large, we skip it,
-			// but also have to prevent anything from the same sender from being included during this iteration.
-			updatedSize := totalSize + txInfo.Size
-			if updatedSize > limit.MaxTxBytes {
-				h.lane.Logger().Debug(
-					"failed to select tx for lane; tx bytes above the maximum allowed",
-					"lane", h.lane.Name(),
-					"tx_size", txInfo.Size,
-					"total_size", totalSize,
-					"max_tx_bytes", limit.MaxTxBytes,
-					"tx_hash", utils.TxHash(txInfo.TxBytes),
-				)
-				// Early-break: if remaining byte budget is less than 1/1000 of the limit,
-				// further scanning is unlikely to find a fitting tx — stop early.
-				remainingSize := limit.MaxTxBytes - totalSize
-				if remainingSize < minRemainingSizeToContinue {
+				// ── already_in_proposal ───────────────────────────────────────────────
+				// If the transaction is already in the (partial) block proposal, we skip it.
+				if proposal.Contains(txInfo.Key()) {
 					h.lane.Logger().Debug(
-						"stopping lane selection; remaining byte budget below continuation threshold",
+						"failed to select tx for lane; tx is already in proposal",
+						"tx_hash", utils.TxHash(txInfo.TxBytes),
 						"lane", h.lane.Name(),
-						"remaining_bytes", remainingSize,
-						"continue_threshold_bytes", minRemainingSizeToContinue,
-						"max_tx_bytes", limit.MaxTxBytes,
 					)
-					break
+					continue
 				}
-				markSkippedSender(senderStr)
-				continue
-			}
 
-			// ── updated_gas ───────────────────────────────────────────────────────
-			// If the gas limit of the transaction is too large, we skip it,
-			// but also have to prevent anything from the same sender from being included during this iteration.
-			updatedGas := totalGas + txInfo.GasLimit
-			if updatedGas > limit.MaxGasLimit {
-				h.lane.Logger().Debug(
-					"failed to select tx for lane; gas limit above the maximum allowed",
-					"lane", h.lane.Name(),
-					"tx_gas", txInfo.GasLimit,
-					"total_gas", totalGas,
-					"max_gas", limit.MaxGasLimit,
-					"tx_hash", utils.TxHash(txInfo.TxBytes),
-				)
-				// Early-break: if remaining gas budget is less than 1/1000 of the limit,
-				// further scanning is unlikely to find a fitting tx — stop early.
-				remainingGas := limit.MaxGasLimit - totalGas
-				if remainingGas < minRemainingGasToContinue {
-					h.lane.Logger().Debug(
-						"stopping lane selection; remaining gas budget below continuation threshold",
-						"lane", h.lane.Name(),
-						"remaining_gas", remainingGas,
-						"continue_threshold_gas", minRemainingGasToContinue,
-						"max_gas", limit.MaxGasLimit,
-					)
-					break
-				}
-				markSkippedSender(senderStr)
-				continue
-			}
-
-			// ── verify ────────────────────────────────────────────────────────────
-			// Verify nonce(s). When FastNonceVerifier is set, parse signature count
-			// to choose the optimal path and avoid a full VerifyTx / GetSigners call.
-			if h.fastNonceVerifier != nil {
+				// ── verify ────────────────────────────────────────────────────────────
+				// Verify nonce(s). When FastNonceVerifier is set, parse signature count
+				// to choose the optimal path and avoid a full VerifyTx / GetSigners call.
 				// verify_sig_parse: cast + GetSignaturesV2
 				tSigParse := time.Now()
 				sigTx, ok := tx.(signing.SigVerifiableTx)
@@ -329,103 +323,58 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 					txsToRemove = append(txsToRemove, tx)
 					continue
 				}
-
-				if len(sigs) == 1 {
-					// verify_single: fastNonceVerifier for single-signer tx.
-					// senderIndex is iterated in ascending nonce order, so:
-					//   cmp < 0 (stale):  nonce < expected → remove (will never be valid again).
-					//   cmp > 0 (future): nonce > expected → skip entire sender.
-					//   err != nil:        non-nonce error → remove.
-					tSingle := time.Now()
-					cmp, verifyErr := h.fastNonceVerifier(ctx, senderStr, senderNonce)
-					accVerifySingleNs += time.Since(tSingle).Nanoseconds()
-					if verifyErr != nil {
-						h.lane.Logger().Info(
-							"failed fast nonce verify (single signer), removing tx",
-							"tx_hash", utils.TxHash(txInfo.TxBytes),
-							"sender", senderStr,
-							"err", verifyErr,
-						)
-						txsToRemove = append(txsToRemove, tx)
-						continue
-					}
-					if cmp > 0 {
-						// future tx: gap — all subsequent nonces from this sender are larger.
-						markSkippedSender(senderStr)
-						continue
-					}
-					if cmp < 0 {
-						// stale tx: already committed on-chain.
-						h.lane.Logger().Debug(
-							"removing stale tx from mempool",
-							"tx_hash", utils.TxHash(txInfo.TxBytes),
-							"sender", senderStr,
-							"nonce", senderNonce,
-						)
-						txsToRemove = append(txsToRemove, tx)
-						continue
-					}
-				} else {
-					// verify_multi: multiple independent signers.
-					// GetSigners() is needed here; the overhead is acceptable for multi-sig txs.
-					tSigParse2 := time.Now()
-					signers, signersErr := sigTx.GetSigners()
-					accVerifySigParseNs += time.Since(tSigParse2).Nanoseconds()
-					if signersErr != nil {
-						h.lane.Logger().Info("failed to get signers", "tx_hash", utils.TxHash(txInfo.TxBytes), "err", signersErr)
-						txsToRemove = append(txsToRemove, tx)
-						continue
-					}
-					if len(signers) != len(sigs) {
-						h.lane.Logger().Info("signer/signature count mismatch", "tx_hash", utils.TxHash(txInfo.TxBytes))
-						txsToRemove = append(txsToRemove, tx)
-						continue
-					}
-					var multiErr error
-					for i, addrBytes := range signers {
-						addrStr := sdk.AccAddress(addrBytes).String()
-						cmp, verifyErr := h.fastNonceVerifier(ctx, addrStr, sigs[i].Sequence)
-						if verifyErr != nil {
-							multiErr = verifyErr
-						} else if cmp != 0 {
-							multiErr = fmt.Errorf("nonce mismatch for signer %s", addrStr)
-						}
-						if multiErr != nil {
-							h.lane.Logger().Info(
-								"failed fast nonce verify (multi signer)",
-								"tx_hash", utils.TxHash(txInfo.TxBytes),
-								"signer", addrStr,
-								"err", multiErr,
-							)
-							break
-						}
-					}
-					if multiErr != nil {
-						txsToRemove = append(txsToRemove, tx)
-						continue
-					}
-				}
-			} else {
-				// verify_full: no FastNonceVerifier — fall back to full ante handler.
-				if err = h.lane.VerifyTx(ctx, tx, false); err != nil {
-					h.lane.Logger().Info(
-						"failed to verify tx",
+				if len(sigs) > 1 {
+					h.lane.Logger().Error(
+						"exchange lane does not support multisig transactions",
 						"tx_hash", utils.TxHash(txInfo.TxBytes),
-						"err", err,
+						"signature_count", len(sigs),
 					)
 					txsToRemove = append(txsToRemove, tx)
 					continue
 				}
-			}
 
-			// ── include ───────────────────────────────────────────────────────────
-			tInclude := time.Now()
-			totalSize += txInfo.Size
-			totalGas += txInfo.GasLimit
-			txsToInclude = append(txsToInclude, tx)
-			// Carry the already-computed TxWithInfo so the caller avoids a second GetTxInfo call.
-			txsWithInfo = append(txsWithInfo, txInfo)
-			accIncludeNs += time.Since(tInclude).Nanoseconds()
+				// verify_single: fastNonceVerifier for single-signer tx.
+				// senderIndex is iterated in ascending nonce order, so:
+				//   cmp < 0 (stale):  nonce < expected → remove (will never be valid again).
+				//   cmp > 0 (future): nonce > expected → skip entire sender.
+				//   err != nil:        non-nonce error → remove.
+				tSingle := time.Now()
+				cmp, verifyErr := h.fastNonceVerifier(ctx, senderStr, senderNonce)
+				accVerifySingleNs += time.Since(tSingle).Nanoseconds()
+				if verifyErr != nil {
+					h.lane.Logger().Info(
+						"failed fast nonce verify (single signer), removing tx",
+						"tx_hash", utils.TxHash(txInfo.TxBytes),
+						"sender", senderStr,
+						"err", verifyErr,
+					)
+					txsToRemove = append(txsToRemove, tx)
+					continue
+				}
+				if cmp > 0 {
+					// future tx: gap — all subsequent nonces from this sender are larger.
+					markSkippedSender(senderStr)
+					continue
+				}
+				if cmp < 0 {
+					// stale tx: already committed on-chain.
+					h.lane.Logger().Debug(
+						"removing stale tx from mempool",
+						"tx_hash", utils.TxHash(txInfo.TxBytes),
+						"sender", senderStr,
+						"nonce", senderNonce,
+					)
+					txsToRemove = append(txsToRemove, tx)
+					continue
+				}
+
+				// ── include ───────────────────────────────────────────────────────────
+				tInclude := time.Now()
+				txsToInclude = append(txsToInclude, tx)
+				// Carry the already-computed TxWithInfo so the caller avoids a second GetTxInfo call.
+				txsWithInfo = append(txsWithInfo, txInfo)
+				accIncludeNs += time.Since(tInclude).Nanoseconds()
+			}
 		}
 
 		return txsToInclude, txsWithInfo, txsToRemove, nil

@@ -54,6 +54,18 @@ func (p *Proposal) UpdateProposal(lane Lane, partialProposal []utils.TxWithInfo)
 		txs[index] = tx.TxBytes
 	}
 
+	// TODO: exchange的gas和bytes不再计入区块限制，让区块限制只针对其余lane？
+	if lane.Name() == "exchange" {
+		p.Info.BlockSize += partialProposalSize
+		p.Info.GasLimit += partialProposalGasLimit
+		p.Info.TxsByLane[lane.Name()] = uint64(len(partialProposal))
+		p.Txs = append(p.Txs, txs...)
+		for txKey := range txKeys {
+			p.Cache[txKey] = struct{}{}
+		}
+		return nil
+	}
+
 	// invariant check: Ensure that the partial proposal is not too large.
 	limit := p.GetLaneLimits(lane.GetMaxBlockSpace())
 	if partialProposalSize > limit.MaxTxBytes {
