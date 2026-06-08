@@ -7,6 +7,7 @@ import (
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	txtypes "github.com/cosmos/cosmos-sdk/types/tx"
 	"github.com/cosmos/cosmos-sdk/x/auth/signing"
 
 	"github.com/skip-mev/block-sdk/v2/block/proposals"
@@ -17,6 +18,10 @@ import (
 // from the mempool index key without re-parsing the transaction.
 type senderInfoGetter interface {
 	SenderInfo() (sender string, nonce uint64)
+}
+
+type protoTxGetter interface {
+	GetProtoTx() *txtypes.Tx
 }
 
 type exchangeCandidate struct {
@@ -70,15 +75,31 @@ func (h *DefaultProposalHandler) WithFastNonceVerifier(fn FastNonceVerifier) *De
 	return h
 }
 
+func signatureCount(tx sdk.Tx) (int, error) {
+	if protoTx, ok := tx.(protoTxGetter); ok {
+		tx := protoTx.GetProtoTx()
+		if tx == nil || tx.AuthInfo == nil {
+			return 0, fmt.Errorf("tx missing auth info")
+		}
+		if len(tx.Signatures) < len(tx.AuthInfo.SignerInfos) {
+			return 0, fmt.Errorf("signature count %d below signer info count %d", len(tx.Signatures), len(tx.AuthInfo.SignerInfos))
+		}
+		return len(tx.AuthInfo.SignerInfos), nil
+	}
+
+	return 0, fmt.Errorf("tx does not expose proto tx")
+}
+
 func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
 	ctx sdk.Context,
 	candidates []exchangeCandidate,
 ) []sdk.Tx {
 	type txInfoResult struct {
-		index   int
-		info    utils.TxWithInfo
-		matches bool
-		err     error
+		index    int
+		info     utils.TxWithInfo
+		matches  bool
+		sigCount int
+		err      error
 	}
 
 	jobs := make(chan int)
@@ -96,14 +117,19 @@ func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
 			for index := range jobs {
 				txInfo, err := h.lane.GetTxInfoLight(ctx, candidates[index].tx)
 				matches := false
+				sigCount := 0
 				if err == nil {
 					matches = h.lane.Match(ctx, candidates[index].tx)
 				}
+				if err == nil && matches {
+					sigCount, err = signatureCount(candidates[index].tx)
+				}
 				results <- txInfoResult{
-					index:   index,
-					info:    txInfo,
-					matches: matches,
-					err:     err,
+					index:    index,
+					info:     txInfo,
+					matches:  matches,
+					sigCount: sigCount,
+					err:      err,
 				}
 			}
 		}()
@@ -119,7 +145,7 @@ func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
 	var txsToRemove []sdk.Tx
 	for result := range results {
 		if result.err != nil {
-			h.lane.Logger().Info("failed to get tx info", "err", result.err)
+			h.lane.Logger().Info("failed to get candidate tx info", "err", result.err)
 			txsToRemove = append(txsToRemove, candidates[result.index].tx)
 			continue
 		}
@@ -130,6 +156,20 @@ func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
 				"failed to select tx for lane; tx does not belong to lane",
 				"tx_hash", utils.TxHash(result.info.TxBytes),
 				"lane", h.lane.Name(),
+			)
+			txsToRemove = append(txsToRemove, candidates[result.index].tx)
+			continue
+		}
+		if result.sigCount == 0 {
+			h.lane.Logger().Info("tx has no signatures", "tx_hash", utils.TxHash(result.info.TxBytes))
+			txsToRemove = append(txsToRemove, candidates[result.index].tx)
+			continue
+		}
+		if result.sigCount > 1 {
+			h.lane.Logger().Error(
+				"exchange lane does not support multisig transactions",
+				"tx_hash", utils.TxHash(result.info.TxBytes),
+				"signature_count", result.sigCount,
 			)
 			txsToRemove = append(txsToRemove, candidates[result.index].tx)
 			continue
@@ -161,15 +201,14 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 		// Accumulated timing (nanoseconds) per block for lane_sim Prometheus metrics.
 		// Each variable corresponds to one labelled step emitted in the defer below.
 		var (
-			accSenderInfoNs     int64 // extract sender/nonce from iterator key
-			accTxInfoNs         int64 // GetTxInfoLight + lane match
-			accSkippedSenderNs  int64 // lookup + hit-branch for skipped senders
-			accVerifySigParseNs int64 // GetSignaturesV2 / GetSigners (inside verify path)
-			accVerifySingleNs   int64 // fastNonceVerifier single-signer call
-			accIterTxNs         int64 // iterator.Tx()
-			accIncludeNs        int64 // append to txsToInclude / txsWithInfo
-			accNextNs           int64 // iterator.Next
-			accFlushNs          int64 // fastNonceVerifier flush sentinel
+			accSenderInfoNs    int64 // extract sender/nonce from iterator key
+			accTxInfoNs        int64 // GetTxInfoLight + lane match + signature count
+			accSkippedSenderNs int64 // lookup + hit-branch for skipped senders
+			accVerifySingleNs  int64 // fastNonceVerifier single-signer call
+			accIterTxNs        int64 // iterator.Tx()
+			accIncludeNs       int64 // append to txsToInclude / txsWithInfo
+			accNextNs          int64 // iterator.Next
+			accFlushNs         int64 // fastNonceVerifier flush sentinel
 		)
 
 		_ = limit
@@ -202,7 +241,6 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 			obs("sender_info", accSenderInfoNs)
 			obs("tx_info", accTxInfoNs)
 			obs("skipped_sender", accSkippedSenderNs)
-			obs("verify_sig_parse", accVerifySigParseNs)
 			obs("verify_single", accVerifySingleNs)
 			obs("include", accIncludeNs)
 			obs("next", accNextNs)
@@ -210,7 +248,7 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 
 			accountedNs := accIterTxNs + accSenderInfoNs + accTxInfoNs +
 				accSkippedSenderNs +
-				accVerifySigParseNs + accVerifySingleNs +
+				accVerifySingleNs +
 				accIncludeNs + accNextNs + accFlushNs
 			otherNs := totalNs - accountedNs
 			if otherNs < 0 {
@@ -295,40 +333,6 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 					continue
 				}
 
-				// ── verify ────────────────────────────────────────────────────────────
-				// Verify nonce(s). When FastNonceVerifier is set, parse signature count
-				// to choose the optimal path and avoid a full VerifyTx / GetSigners call.
-				// verify_sig_parse: cast + GetSignaturesV2
-				tSigParse := time.Now()
-				sigTx, ok := tx.(signing.SigVerifiableTx)
-				if !ok {
-					accVerifySigParseNs += time.Since(tSigParse).Nanoseconds()
-					h.lane.Logger().Info("tx does not implement SigVerifiableTx", "tx_hash", utils.TxHash(txInfo.TxBytes))
-					txsToRemove = append(txsToRemove, tx)
-					continue
-				}
-				sigs, sigErr := sigTx.GetSignaturesV2()
-				accVerifySigParseNs += time.Since(tSigParse).Nanoseconds()
-				if sigErr != nil {
-					h.lane.Logger().Info("failed to get signatures", "tx_hash", utils.TxHash(txInfo.TxBytes), "err", sigErr)
-					txsToRemove = append(txsToRemove, tx)
-					continue
-				}
-				if len(sigs) == 0 {
-					h.lane.Logger().Info("tx has no signatures", "tx_hash", utils.TxHash(txInfo.TxBytes))
-					txsToRemove = append(txsToRemove, tx)
-					continue
-				}
-				if len(sigs) > 1 {
-					h.lane.Logger().Error(
-						"exchange lane does not support multisig transactions",
-						"tx_hash", utils.TxHash(txInfo.TxBytes),
-						"signature_count", len(sigs),
-					)
-					txsToRemove = append(txsToRemove, tx)
-					continue
-				}
-
 				// verify_single: fastNonceVerifier for single-signer tx.
 				// senderIndex is iterated in ascending nonce order, so:
 				//   cmp < 0 (stale):  nonce < expected → remove (will never be valid again).
@@ -407,7 +411,7 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			accTxInfoNs         int64 // GetTxInfoLight
 			accSkippedSenderNs  int64 // lookup + hit-branch for skipped senders
 			accLaneMatchNs      int64 // h.lane.Match
-			accVerifySigParseNs int64 // GetSignaturesV2 / GetSigners (inside verify path)
+			accVerifySigParseNs int64 // signature count / GetSignaturesV2 for multi-sig fallback
 			accVerifySingleNs   int64 // fastNonceVerifier single-signer call
 			accIterTxNs         int64 // iterator.Tx()
 			accIncludeNs        int64 // append to txsToInclude / txsWithInfo
@@ -634,29 +638,22 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 			// Verify nonce(s). When FastNonceVerifier is set, parse signature count
 			// to choose the optimal path and avoid a full VerifyTx / GetSigners call.
 			if h.fastNonceVerifier != nil {
-				// verify_sig_parse: cast + GetSignaturesV2
+				// verify_sig_parse: read signature count without constructing SignatureV2 when possible.
 				tSigParse := time.Now()
-				sigTx, ok := tx.(signing.SigVerifiableTx)
-				if !ok {
-					accVerifySigParseNs += time.Since(tSigParse).Nanoseconds()
-					h.lane.Logger().Info("tx does not implement SigVerifiableTx", "tx_hash", utils.TxHash(txInfo.TxBytes))
-					txsToRemove = append(txsToRemove, tx)
-					continue
-				}
-				sigs, sigErr := sigTx.GetSignaturesV2()
+				sigCount, sigErr := signatureCount(tx)
 				accVerifySigParseNs += time.Since(tSigParse).Nanoseconds()
 				if sigErr != nil {
-					h.lane.Logger().Info("failed to get signatures", "tx_hash", utils.TxHash(txInfo.TxBytes), "err", sigErr)
+					h.lane.Logger().Info("failed to get signature count", "tx_hash", utils.TxHash(txInfo.TxBytes), "err", sigErr)
 					txsToRemove = append(txsToRemove, tx)
 					continue
 				}
-				if len(sigs) == 0 {
+				if sigCount == 0 {
 					h.lane.Logger().Info("tx has no signatures", "tx_hash", utils.TxHash(txInfo.TxBytes))
 					txsToRemove = append(txsToRemove, tx)
 					continue
 				}
 
-				if len(sigs) == 1 {
+				if sigCount == 1 {
 					// verify_single: fastNonceVerifier for single-signer tx.
 					// senderIndex is iterated in ascending nonce order, so:
 					//   cmp < 0 (stale):  nonce < expected → remove (will never be valid again).
@@ -695,8 +692,23 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					// verify_multi: multiple independent signers.
 					// GetSigners() is needed here; the overhead is acceptable for multi-sig txs.
 					tSigParse2 := time.Now()
-					signers, signersErr := sigTx.GetSigners()
+					sigTx, ok := tx.(signing.SigVerifiableTx)
+					if !ok {
+						accVerifySigParseNs += time.Since(tSigParse2).Nanoseconds()
+						h.lane.Logger().Info("tx does not implement SigVerifiableTx", "tx_hash", utils.TxHash(txInfo.TxBytes))
+						txsToRemove = append(txsToRemove, tx)
+						continue
+					}
+					sigs, sigErr := sigTx.GetSignaturesV2()
 					accVerifySigParseNs += time.Since(tSigParse2).Nanoseconds()
+					if sigErr != nil {
+						h.lane.Logger().Info("failed to get signatures", "tx_hash", utils.TxHash(txInfo.TxBytes), "err", sigErr)
+						txsToRemove = append(txsToRemove, tx)
+						continue
+					}
+					tSigners := time.Now()
+					signers, signersErr := sigTx.GetSigners()
+					accVerifySigParseNs += time.Since(tSigners).Nanoseconds()
 					if signersErr != nil {
 						h.lane.Logger().Info("failed to get signers", "tx_hash", utils.TxHash(txInfo.TxBytes), "err", signersErr)
 						txsToRemove = append(txsToRemove, tx)
