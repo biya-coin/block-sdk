@@ -36,7 +36,18 @@ type exchangeCandidate struct {
 // to clear the verifier's internal cache. The nonce argument is ignored.
 const FastNonceFlushSender = "\x00flush\x00"
 
-const tx_num = 10000
+func maxBlockTxsFromContext(ctx sdk.Context) (int, error) {
+	params := ctx.ConsensusParams()
+	if params.Block == nil {
+		return 0, fmt.Errorf("consensus block params are required")
+	}
+
+	if params.Block.MaxTxs <= 0 {
+		return 0, fmt.Errorf("consensus block max_txs must be greater than 0, got %d", params.Block.MaxTxs)
+	}
+
+	return int(params.Block.MaxTxs), nil
+}
 
 // FastNonceVerifier is an optional callback for single-signer transactions.
 // It verifies that `sender`'s current sequence matches `nonce` and increments
@@ -165,6 +176,8 @@ func (h *DefaultProposalHandler) fillExchangeCandidateTxInfo(
 			txsToRemove = append(txsToRemove, candidates[result.index].tx)
 			continue
 		}
+		// TODO: 支持多签，进入交易池时，如果是多签把联合签名的sender+nonce也放入scores里，保证nonce的唯一性，这里只校验nonce和最新100个nonce是否重复及是否在时间窗口，不校验签名、数量、nonce连续
+		// 用scores来保证nonce的唯一性，包括联合签名
 		if result.sigCount > 1 {
 			h.lane.Logger().Error(
 				"exchange lane does not support multisig transactions",
@@ -257,12 +270,17 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 			obs("other", otherNs)
 		}()
 
+		maxBlockTxs, err := maxBlockTxsFromContext(ctx)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
 		// Select all transactions in the mempool that are valid and not already in the
 		// partial proposal.
 		iterator := h.lane.Select(ctx, nil)
 
-		for iterator != nil && len(txsToInclude) < tx_num {
-			remainingTxs := tx_num - len(txsToInclude)
+		for iterator != nil && len(txsToInclude) < maxBlockTxs {
+			remainingTxs := maxBlockTxs - len(txsToInclude)
 			candidates := make([]exchangeCandidate, 0, remainingTxs)
 
 			for i := 0; i < remainingTxs && iterator != nil; i++ {
