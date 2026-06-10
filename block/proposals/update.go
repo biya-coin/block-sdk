@@ -35,32 +35,35 @@ func (p *Proposal) UpdateProposal(lane Lane, partialProposal []utils.TxWithInfo)
 	}
 
 	// Aggregate info from the transactions.
-	hashes := make(map[string]struct{})
+	txKeys := make(map[string]struct{})
 	txs := make([][]byte, len(partialProposal))
 	partialProposalSize := int64(0)
 	partialProposalGasLimit := uint64(0)
 
 	for index, tx := range partialProposal {
-		p.Logger.Debug(
-			"updating proposal with tx",
-			"index", index+len(p.Txs),
-			"lane", lane.Name(),
-			"hash", tx.Hash,
-			"size", tx.Size,
-			"gas_limit", tx.GasLimit,
-			"signers", tx.Signers,
-			"priority", tx.Priority,
-		)
+		txKey := tx.Key()
 
 		// invariant check: Ensure that the transaction is not already in the proposal.
-		if _, ok := p.Cache[tx.Hash]; ok {
-			return fmt.Errorf("transaction %s is already in the proposal", tx.Hash)
+		if _, ok := p.Cache[txKey]; ok {
+			return fmt.Errorf("transaction %s is already in the proposal", txKey)
 		}
 
-		hashes[tx.Hash] = struct{}{}
+		txKeys[txKey] = struct{}{}
 		partialProposalSize += tx.Size
 		partialProposalGasLimit += tx.GasLimit
 		txs[index] = tx.TxBytes
+	}
+
+	// TODO: exchange的gas和bytes不再计入区块限制，让区块限制只针对其余lane？
+	if lane.Name() == "exchange" {
+		p.Info.BlockSize += partialProposalSize
+		p.Info.GasLimit += partialProposalGasLimit
+		p.Info.TxsByLane[lane.Name()] = uint64(len(partialProposal))
+		p.Txs = append(p.Txs, txs...)
+		for txKey := range txKeys {
+			p.Cache[txKey] = struct{}{}
+		}
+		return nil
 	}
 
 	// invariant check: Ensure that the partial proposal is not too large.
@@ -111,8 +114,8 @@ func (p *Proposal) UpdateProposal(lane Lane, partialProposal []utils.TxWithInfo)
 
 	// Update the proposal.
 	p.Txs = append(p.Txs, txs...)
-	for hash := range hashes {
-		p.Cache[hash] = struct{}{}
+	for txKey := range txKeys {
+		p.Cache[txKey] = struct{}{}
 	}
 
 	return nil

@@ -197,7 +197,7 @@ func (h *ProposalHandler) VerifyBidBasic(
 	}
 
 	// This should never happen, but we check just in case.
-	if proposal.Contains(txInfo.Hash) {
+	if proposal.Contains(txInfo.Key()) {
 		return nil, fmt.Errorf("invalid bid tx; bid tx is already in the proposal")
 	}
 
@@ -217,7 +217,7 @@ func (h *ProposalHandler) VerifyBidBasic(
 			return nil, fmt.Errorf("err retrieving transaction info: %s", err)
 		}
 
-		if proposal.Contains(bundledTxInfo.Hash) {
+		if proposal.Contains(bundledTxInfo.Key()) {
 			return nil, fmt.Errorf("invalid bid tx; bundled tx is already in the proposal")
 		}
 

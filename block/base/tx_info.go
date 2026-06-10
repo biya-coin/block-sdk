@@ -1,11 +1,8 @@
 package base
 
 import (
-	"encoding/hex"
 	"fmt"
-	"strings"
 
-	comettypes "github.com/cometbft/cometbft/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/skip-mev/block-sdk/v2/block/utils"
@@ -27,7 +24,6 @@ func (l *BaseLane) GetTxInfoLight(ctx sdk.Context, tx sdk.Tx) (utils.TxWithInfo,
 	}
 
 	return utils.TxWithInfo{
-		Hash:     strings.ToUpper(hex.EncodeToString(comettypes.Tx(txBytes).Hash())),
 		Size:     int64(len(txBytes)),
 		GasLimit: gasTx.GetGas(),
 		TxBytes:  txBytes,
@@ -55,7 +51,6 @@ func (l *BaseLane) GetTxInfo(ctx sdk.Context, tx sdk.Tx) (utils.TxWithInfo, erro
 	}
 
 	return utils.TxWithInfo{
-		Hash:     strings.ToUpper(hex.EncodeToString(comettypes.Tx(txBytes).Hash())),
 		Size:     int64(len(txBytes)),
 		GasLimit: gasTx.GetGas(),
 		TxBytes:  txBytes,

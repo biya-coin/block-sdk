@@ -23,6 +23,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/grpc-ecosystem/grpc-gateway v1.16.0
 	github.com/huandu/skiplist v1.2.0
+	github.com/prometheus/client_golang v1.21.1
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.10.0
 	golang.org/x/tools v0.29.0
@@ -230,7 +231,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/polyfloyd/go-errorlint v1.5.2 // indirect
-	github.com/prometheus/client_golang v1.21.1 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
@@ -342,7 +342,7 @@ replace (
 	github.com/99designs/keyring => github.com/cosmos/keyring v1.2.0
 
 	// Use CometBFT v1.0.1 with Mempool lanes and DOG
-	github.com/cometbft/cometbft => github.com/InjectiveLabs/cometbft v1.0.1-inj.3
-	github.com/cometbft/cometbft/api => github.com/injectivelabs/cometbft/api v1.0.0-inj.2
+	github.com/cometbft/cometbft => github.com/biya-coin/cometbft v1.0.1-0.20260609081231-a0d934a50524
+	github.com/cometbft/cometbft/api => github.com/biya-coin/cometbft/api v1.0.1-0.20260609081231-a0d934a50524
 	github.com/cosmos/cosmos-sdk => github.com/InjectiveLabs/cosmos-sdk v0.50.14-inj
 )

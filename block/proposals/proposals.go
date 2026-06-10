@@ -98,8 +98,8 @@ func (p *Proposal) GetLaneLimits(ratio math.LegacyDec) LaneLimits {
 	}
 }
 
-// Contains returns true if the proposal contains the given transaction.
-func (p *Proposal) Contains(txHash string) bool {
-	_, ok := p.Cache[txHash]
+// Contains returns true if the proposal contains the given sender/nonce key.
+func (p *Proposal) Contains(txKey string) bool {
+	_, ok := p.Cache[txKey]
 	return ok
 }
