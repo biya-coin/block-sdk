@@ -16,6 +16,10 @@ import (
 )
 
 type (
+	processProposalDecodedTxRecorder interface {
+		RecordProcessProposalDecodedTxs(height int64, hash []byte, txs []sdk.Tx)
+	}
+
 	// ProposalHandler is a wrapper around the ABCI++ PrepareProposal and ProcessProposal
 	// handlers.
 	ProposalHandler struct {
@@ -26,6 +30,8 @@ type (
 		useCustomProcessProposal bool
 	}
 )
+
+const processProposalDecodedTxRecorderKey = "process-proposal-decoded-tx-recorder"
 
 // NewDefaultProposalHandler returns a new ABCI++ proposal handler. This proposal handler will
 // iteratively call each of the lanes in the chain to prepare and process the proposal. This
@@ -180,6 +186,10 @@ func (h *ProposalHandler) ProcessProposalHandler() sdk.ProcessProposalHandler {
 		if err != nil {
 			h.logger.Error("failed to validate the proposal", "err", err)
 			return &abci.ProcessProposalResponse{Status: abci.PROCESS_PROPOSAL_STATUS_REJECT}, err
+		}
+
+		if recorder, ok := ctx.Value(processProposalDecodedTxRecorderKey).(processProposalDecodedTxRecorder); ok {
+			recorder.RecordProcessProposalDecodedTxs(req.Height, req.Hash, decodedTxs)
 		}
 
 		h.logger.Debug(
