@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 
 	comettypes "github.com/cometbft/cometbft/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -80,14 +81,30 @@ func TxHash(txBytes []byte) string {
 
 // GetDecodedTxs returns the decoded transactions from the given bytes.
 func GetDecodedTxs(txDecoder sdk.TxDecoder, txs [][]byte) ([]sdk.Tx, error) {
-	var decodedTxs []sdk.Tx
-	for _, txBz := range txs {
-		tx, err := txDecoder(txBz)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode transaction: %w", err)
-		}
+	decodedTxs := make([]sdk.Tx, len(txs))
+	errs := make([]error, len(txs))
 
-		decodedTxs = append(decodedTxs, tx)
+	var wg sync.WaitGroup
+	for i, txBz := range txs {
+		wg.Add(1)
+		go func(index int, bz []byte) {
+			defer wg.Done()
+
+			tx, err := txDecoder(bz)
+			if err != nil {
+				errs[index] = fmt.Errorf("failed to decode transaction: %w", err)
+				return
+			}
+
+			decodedTxs[index] = tx
+		}(i, txBz)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return decodedTxs, nil
@@ -95,14 +112,30 @@ func GetDecodedTxs(txDecoder sdk.TxDecoder, txs [][]byte) ([]sdk.Tx, error) {
 
 // GetEncodedTxs returns the encoded transactions from the given bytes.
 func GetEncodedTxs(txEncoder sdk.TxEncoder, txs []sdk.Tx) ([][]byte, error) {
-	var encodedTxs [][]byte
-	for _, tx := range txs {
-		txBz, err := txEncoder(tx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode transaction: %w", err)
-		}
+	encodedTxs := make([][]byte, len(txs))
+	errs := make([]error, len(txs))
 
-		encodedTxs = append(encodedTxs, txBz)
+	var wg sync.WaitGroup
+	for i, tx := range txs {
+		wg.Add(1)
+		go func(index int, tx sdk.Tx) {
+			defer wg.Done()
+
+			txBz, err := txEncoder(tx)
+			if err != nil {
+				errs[index] = fmt.Errorf("failed to encode transaction: %w", err)
+				return
+			}
+
+			encodedTxs[index] = txBz
+		}(i, tx)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return encodedTxs, nil
