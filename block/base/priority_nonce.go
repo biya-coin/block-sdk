@@ -491,6 +491,23 @@ func (mp *PriorityNonceMempool[C]) Remove(tx sdk.Tx) error {
 		return fmt.Errorf("attempted to remove a tx with no signatures")
 	}
 
+	return mp.removeWithSignersLocked(signers)
+}
+
+// RemoveWithSigners removes a transaction using signer data that was already
+// extracted by the caller.
+func (mp *PriorityNonceMempool[C]) RemoveWithSigners(_ sdk.Tx, signers []signer_extraction.SignerData) error {
+	mp.mux.Lock()
+	defer mp.mux.Unlock()
+
+	if len(signers) == 0 {
+		return fmt.Errorf("attempted to remove a tx with no signatures")
+	}
+
+	return mp.removeWithSignersLocked(signers)
+}
+
+func (mp *PriorityNonceMempool[C]) removeWithSignersLocked(signers []signer_extraction.SignerData) error {
 	sig := signers[0]
 	sender := sig.Signer.String()
 	nonce := sig.Sequence
@@ -524,6 +541,24 @@ func (mp *PriorityNonceMempool[C]) Contains(tx sdk.Tx) bool {
 	if err != nil {
 		return false
 	}
+	if len(signers) == 0 {
+		return false
+	}
+
+	sig := signers[0]
+	nonce := sig.Sequence
+	sender := sig.Signer.String()
+
+	_, ok := mp.scores[txMeta[C]{nonce: nonce, sender: sender}]
+	return ok
+}
+
+// ContainsWithSigners returns true if the signer/nonce pair is in the mempool
+// without extracting signer data from the transaction again.
+func (mp *PriorityNonceMempool[C]) ContainsWithSigners(_ sdk.Tx, signers []signer_extraction.SignerData) bool {
+	mp.mux.RLock()
+	defer mp.mux.RUnlock()
+
 	if len(signers) == 0 {
 		return false
 	}
