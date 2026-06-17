@@ -34,6 +34,7 @@ type (
 
 	signerAwareMempool interface {
 		ContainsWithSigners(sdk.Tx, []signer_extraction.SignerData) bool
+		ContainsManyWithSigners([][]signer_extraction.SignerData) []bool
 		RemoveWithSigners(sdk.Tx, []signer_extraction.SignerData) error
 	}
 )
@@ -87,7 +88,11 @@ func (cm *Mempool[C]) RemoveWithSigners(tx sdk.Tx, signers []signer_extraction.S
 		return cm.Remove(tx)
 	}
 
-	if err := index.RemoveWithSigners(tx, signers); err != nil && !errors.Is(err, sdkmempool.ErrTxNotFound) {
+	if err := index.RemoveWithSigners(tx, signers); err != nil {
+		if errors.Is(err, sdkmempool.ErrTxNotFound) {
+			return err
+		}
+
 		return fmt.Errorf("failed to remove transaction from the mempool: %w", err)
 	}
 
@@ -121,6 +126,22 @@ func (cm *Mempool[C]) ContainsWithSigners(tx sdk.Tx, signers []signer_extraction
 	}
 
 	return index.ContainsWithSigners(tx, signers)
+}
+
+// ContainsManyWithSigners checks many transactions using signer data that was
+// already extracted by the caller.
+func (cm *Mempool[C]) ContainsManyWithSigners(txs []sdk.Tx, signersList [][]signer_extraction.SignerData) []bool {
+	index, ok := cm.index.(signerAwareMempool)
+	if ok {
+		return index.ContainsManyWithSigners(signersList)
+	}
+
+	contains := make([]bool, len(txs))
+	for i, tx := range txs {
+		contains[i] = cm.Contains(tx)
+	}
+
+	return contains
 }
 
 // Compare determines the relative priority of two transactions belonging in the same lane.

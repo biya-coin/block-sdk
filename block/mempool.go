@@ -2,6 +2,7 @@ package block
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -32,10 +33,14 @@ type (
 	// TxSignerInfo stores signer data that was extracted before mempool
 	// removal. The Index field maps this entry back to the original tx slice.
 	TxSignerInfo struct {
-		Index   int
-		Tx      sdk.Tx
-		Signers []signer_extraction.SignerData
-		Err     error
+		Index       int
+		Tx          sdk.Tx
+		Signers     []signer_extraction.SignerData
+		LaneIndex   int
+		LaneName    string
+		LaneFound   bool
+		LaneChecked bool
+		Err         error
 	}
 
 	// LanedMempool defines the Block SDK mempool implementation. It contains a registry
@@ -55,6 +60,10 @@ type (
 	signerAwareLane interface {
 		ContainsWithSigners(sdk.Tx, []signer_extraction.SignerData) bool
 		RemoveWithSigners(sdk.Tx, []signer_extraction.SignerData) error
+	}
+
+	batchSignerAwareLane interface {
+		ContainsManyWithSigners([]sdk.Tx, [][]signer_extraction.SignerData) []bool
 	}
 )
 
@@ -230,10 +239,11 @@ func (m *LanedMempool) PreExtractSigners(txs []sdk.Tx) []TxSignerInfo {
 				tx := txs[index]
 				signers, err := m.extractSignersForRemoval(tx)
 				infos[index] = TxSignerInfo{
-					Index:   index,
-					Tx:      tx,
-					Signers: signers,
-					Err:     err,
+					Index:     index,
+					Tx:        tx,
+					Signers:   signers,
+					LaneIndex: -1,
+					Err:       err,
 				}
 			}
 		}()
@@ -244,6 +254,8 @@ func (m *LanedMempool) PreExtractSigners(txs []sdk.Tx) []TxSignerInfo {
 	}
 	close(jobs)
 	wg.Wait()
+
+	m.assignLanesWithSigners(infos)
 
 	return infos
 }
@@ -279,14 +291,7 @@ func (m *LanedMempool) RemoveMany(txs []sdk.Tx) (err error) {
 // path to preserve existing behavior.
 func (m *LanedMempool) RemoveManyWithSigners(infos []TxSignerInfo) error {
 	for _, info := range infos {
-		var err error
-		if info.Err != nil {
-			m.logger.Error("failed to pre-extract signers upon removal for tx", "tx", info.Tx, "err", info.Err)
-			err = m.removeLegacy(info.Tx)
-		} else {
-			err = m.removeWithSigners(info.Tx, info.Signers)
-		}
-		if err != nil {
+		if err := m.removeWithSignerInfo(info); err != nil {
 			return err
 		}
 	}
@@ -322,12 +327,8 @@ func (m *LanedMempool) RemoveWithSignerInfo(tx sdk.Tx, info any) (err error) {
 		if typedInfo.Tx == nil {
 			typedInfo.Tx = tx
 		}
-		if typedInfo.Err != nil {
-			m.logger.Error("failed to pre-extract signers upon removal for tx", "tx", typedInfo.Tx, "err", typedInfo.Err)
-			return m.removeLegacy(typedInfo.Tx)
-		}
 
-		return m.removeWithSigners(typedInfo.Tx, typedInfo.Signers)
+		return m.removeWithSignerInfo(typedInfo)
 	case *TxSignerInfo:
 		if typedInfo == nil {
 			return m.removeLegacy(tx)
@@ -335,12 +336,8 @@ func (m *LanedMempool) RemoveWithSignerInfo(tx sdk.Tx, info any) (err error) {
 		if typedInfo.Tx == nil {
 			typedInfo.Tx = tx
 		}
-		if typedInfo.Err != nil {
-			m.logger.Error("failed to pre-extract signers upon removal for tx", "tx", typedInfo.Tx, "err", typedInfo.Err)
-			return m.removeLegacy(typedInfo.Tx)
-		}
 
-		return m.removeWithSigners(typedInfo.Tx, typedInfo.Signers)
+		return m.removeWithSignerInfo(*typedInfo)
 	default:
 		return m.removeLegacy(tx)
 	}
@@ -348,7 +345,12 @@ func (m *LanedMempool) RemoveWithSignerInfo(tx sdk.Tx, info any) (err error) {
 
 func (m *LanedMempool) extractSignersForRemoval(tx sdk.Tx) ([]signer_extraction.SignerData, error) {
 	for _, lane := range m.registry {
-		signers, err := lane.SignerExtractor().GetSigners(tx)
+		extractor := lane.SignerExtractor()
+		if extractor == nil {
+			continue
+		}
+
+		signers, err := extractor.GetSigners(tx)
 		if err == nil {
 			if len(signers) == 0 {
 				return nil, fmt.Errorf("no signers found for tx during removal")
@@ -375,18 +377,101 @@ func (m *LanedMempool) removeWithSigners(tx sdk.Tx, signersData []signer_extract
 			return err
 		}
 
-		sig := signersData[0]
-		firstSignerIdentifier := sig.Signer.String()
-		firstSignerNonce := sig.Sequence
-
-		for _, signerData := range signersData {
-			m.txIndex.Remove(signerData.Signer.String(), lane.Name(), firstSignerIdentifier, firstSignerNonce)
-		}
-
+		m.removeTxIndexWithSigners(lane.Name(), signersData)
 		return nil
 	}
 
 	return nil
+}
+
+func (m *LanedMempool) removeWithSignerInfo(info TxSignerInfo) error {
+	if info.Err != nil {
+		m.logger.Error("failed to pre-extract signers upon removal for tx", "tx", info.Tx, "err", info.Err)
+		return m.removeLegacy(info.Tx)
+	}
+	if len(info.Signers) == 0 {
+		return m.removeLegacy(info.Tx)
+	}
+
+	if info.LaneFound && info.LaneIndex >= 0 && info.LaneIndex < len(m.registry) {
+		lane := m.registry[info.LaneIndex]
+		if info.LaneName == "" || lane.Name() == info.LaneName {
+			if err := m.laneRemoveWithSigners(lane, info.Tx, info.Signers); err != nil {
+				if errors.Is(err, sdkmempool.ErrTxNotFound) {
+					return m.removeWithSigners(info.Tx, info.Signers)
+				}
+
+				return err
+			}
+
+			m.removeTxIndexWithSigners(lane.Name(), info.Signers)
+			return nil
+		}
+	}
+	if info.LaneChecked {
+		return m.removeLegacy(info.Tx)
+	}
+
+	return m.removeWithSigners(info.Tx, info.Signers)
+}
+
+func (m *LanedMempool) assignLanesWithSigners(infos []TxSignerInfo) {
+	pending := make([]int, 0, len(infos))
+	for i := range infos {
+		infos[i].LaneIndex = -1
+		if infos[i].Err == nil && len(infos[i].Signers) > 0 {
+			pending = append(pending, i)
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	for laneIndex, lane := range m.registry {
+		if len(pending) == 0 {
+			return
+		}
+
+		txs := make([]sdk.Tx, len(pending))
+		signersList := make([][]signer_extraction.SignerData, len(pending))
+		for i, infoIndex := range pending {
+			txs[i] = infos[infoIndex].Tx
+			signersList[i] = infos[infoIndex].Signers
+		}
+
+		contains := m.laneContainsManyWithSigners(lane, txs, signersList)
+		nextPending := pending[:0]
+		for i, infoIndex := range pending {
+			if i < len(contains) && contains[i] {
+				infos[infoIndex].LaneIndex = laneIndex
+				infos[infoIndex].LaneName = lane.Name()
+				infos[infoIndex].LaneFound = true
+				infos[infoIndex].LaneChecked = true
+				continue
+			}
+
+			nextPending = append(nextPending, infoIndex)
+		}
+		pending = nextPending
+	}
+
+	for _, infoIndex := range pending {
+		infos[infoIndex].LaneChecked = true
+	}
+}
+
+func (m *LanedMempool) removeTxIndexWithSigners(laneName string, signersData []signer_extraction.SignerData) {
+	if len(signersData) == 0 {
+		return
+	}
+
+	sig := signersData[0]
+	firstSignerIdentifier := sig.Signer.String()
+	firstSignerNonce := sig.Sequence
+
+	for _, signerData := range signersData {
+		m.txIndex.Remove(signerData.Signer.String(), laneName, firstSignerIdentifier, firstSignerNonce)
+	}
 }
 
 func (m *LanedMempool) laneContainsWithSigners(lane Lane, tx sdk.Tx, signers []signer_extraction.SignerData) bool {
@@ -395,6 +480,19 @@ func (m *LanedMempool) laneContainsWithSigners(lane Lane, tx sdk.Tx, signers []s
 	}
 
 	return lane.Contains(tx)
+}
+
+func (m *LanedMempool) laneContainsManyWithSigners(lane Lane, txs []sdk.Tx, signersList [][]signer_extraction.SignerData) []bool {
+	if aware, ok := lane.(batchSignerAwareLane); ok {
+		return aware.ContainsManyWithSigners(txs, signersList)
+	}
+
+	contains := make([]bool, len(txs))
+	for i, tx := range txs {
+		contains[i] = m.laneContainsWithSigners(lane, tx, signersList[i])
+	}
+
+	return contains
 }
 
 func (m *LanedMempool) laneRemoveWithSigners(lane Lane, tx sdk.Tx, signers []signer_extraction.SignerData) error {

@@ -571,6 +571,27 @@ func (mp *PriorityNonceMempool[C]) ContainsWithSigners(_ sdk.Tx, signers []signe
 	return ok
 }
 
+// ContainsManyWithSigners checks signer/nonce pairs in a single read lock.
+func (mp *PriorityNonceMempool[C]) ContainsManyWithSigners(signersList [][]signer_extraction.SignerData) []bool {
+	mp.mux.RLock()
+	defer mp.mux.RUnlock()
+
+	contains := make([]bool, len(signersList))
+	for i, signers := range signersList {
+		if len(signers) == 0 {
+			continue
+		}
+
+		sig := signers[0]
+		nonce := sig.Sequence
+		sender := sig.Signer.String()
+
+		_, contains[i] = mp.scores[txMeta[C]{nonce: nonce, sender: sender}]
+	}
+
+	return contains
+}
+
 func IsEmpty[C comparable](mempool sdkmempool.Mempool) error {
 	mp := mempool.(*PriorityNonceMempool[C])
 
