@@ -264,8 +264,6 @@ func (m *LanedMempool) PreExtractSigners(txs []sdk.Tx) []TxSignerInfo {
 	close(jobs)
 	wg.Wait()
 
-	m.assignLanesWithSigners(infos)
-
 	return infos
 }
 
@@ -417,10 +415,6 @@ func (m *LanedMempool) removeWithSignerInfo(info TxSignerInfo) error {
 			return nil
 		}
 	}
-	if info.LaneChecked {
-		return m.removeWithSigners(info.Tx, info.Signers)
-	}
-
 	return m.removeWithSigners(info.Tx, info.Signers)
 }
 
