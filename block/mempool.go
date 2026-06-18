@@ -418,7 +418,7 @@ func (m *LanedMempool) removeWithSignerInfo(info TxSignerInfo) error {
 		}
 	}
 	if info.LaneChecked {
-		return m.removeLegacy(info.Tx)
+		return m.removeWithSigners(info.Tx, info.Signers)
 	}
 
 	return m.removeWithSigners(info.Tx, info.Signers)
