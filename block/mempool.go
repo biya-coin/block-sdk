@@ -181,7 +181,16 @@ func (m *LanedMempool) Remove(tx sdk.Tx) (err error) {
 		}
 	}()
 
-	return m.removeLegacy(tx)
+	signersData, err := m.extractSignersForRemoval(tx)
+	if err != nil {
+		m.logger.Error("failed to extract signers upon removal for tx", "tx", tx, "err", err)
+		return m.removeLegacy(tx)
+	}
+	if len(signersData) == 0 {
+		return m.removeLegacy(tx)
+	}
+
+	return m.removeWithSigners(tx, signersData)
 }
 
 func (m *LanedMempool) removeLegacy(tx sdk.Tx) error {
