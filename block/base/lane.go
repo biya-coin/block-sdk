@@ -151,6 +151,50 @@ func (l *BaseLane) SignerExtractor() signer_extraction.Adapter {
 	return l.cfg.SignerExtractor
 }
 
+// ContainsWithSigners returns true if the transaction is contained in the lane
+// using signer data that was already extracted by the caller.
+func (l *BaseLane) ContainsWithSigners(tx sdk.Tx, signers []signer_extraction.SignerData) bool {
+	mempool, ok := l.LaneMempool.(interface {
+		ContainsWithSigners(sdk.Tx, []signer_extraction.SignerData) bool
+	})
+	if !ok {
+		return l.Contains(tx)
+	}
+
+	return mempool.ContainsWithSigners(tx, signers)
+}
+
+// ContainsManyWithSigners checks many transactions using signer data that was
+// already extracted by the caller.
+func (l *BaseLane) ContainsManyWithSigners(txs []sdk.Tx, signersList [][]signer_extraction.SignerData) []bool {
+	mempool, ok := l.LaneMempool.(interface {
+		ContainsManyWithSigners([]sdk.Tx, [][]signer_extraction.SignerData) []bool
+	})
+	if !ok {
+		contains := make([]bool, len(txs))
+		for i, tx := range txs {
+			contains[i] = l.Contains(tx)
+		}
+
+		return contains
+	}
+
+	return mempool.ContainsManyWithSigners(txs, signersList)
+}
+
+// RemoveWithSigners removes a transaction from the lane using signer data that
+// was already extracted by the caller.
+func (l *BaseLane) RemoveWithSigners(tx sdk.Tx, signers []signer_extraction.SignerData) error {
+	mempool, ok := l.LaneMempool.(interface {
+		RemoveWithSigners(sdk.Tx, []signer_extraction.SignerData) error
+	})
+	if !ok {
+		return l.Remove(tx)
+	}
+
+	return mempool.RemoveWithSigners(tx, signers)
+}
+
 // GetMaxBlockSpace returns the maximum amount of block space that the lane is
 // allowed to consume as a percentage of the total block space.
 func (l *BaseLane) GetMaxBlockSpace() math.LegacyDec {
