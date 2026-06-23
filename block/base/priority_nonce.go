@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/huandu/skiplist"
 
@@ -24,6 +25,7 @@ import (
 	sdkmempool "github.com/cosmos/cosmos-sdk/types/mempool"
 
 	signer_extraction "github.com/skip-mev/block-sdk/v2/adapters/signer_extraction_adapter"
+	"github.com/skip-mev/block-sdk/v2/block/inserttrace"
 )
 
 var (
@@ -228,16 +230,26 @@ func (mp *PriorityNonceMempool[C]) NextSenderTx(sender string) sdk.Tx {
 // Inserting a duplicate tx with a different priority overwrites the existing tx,
 // changing the total order of the mempool.
 func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error {
+	tLockWait := time.Now()
 	mp.mux.Lock()
+	inserttrace.Observe(ctx, "priority_nonce_lock_wait", tLockWait)
+	tLockHeld := time.Now()
 	defer mp.mux.Unlock()
+	defer inserttrace.Observe(ctx, "priority_nonce_lock_held", tLockHeld)
 
+	tCapacity := time.Now()
 	if mp.cfg.MaxTx > 0 && mp.priorityIndex.Len() >= mp.cfg.MaxTx {
+		inserttrace.Observe(ctx, "priority_nonce_capacity_check", tCapacity)
 		return sdkmempool.ErrMempoolTxMaxCapacity
 	} else if mp.cfg.MaxTx < 0 {
+		inserttrace.Observe(ctx, "priority_nonce_capacity_check", tCapacity)
 		return nil
 	}
+	inserttrace.Observe(ctx, "priority_nonce_capacity_check", tCapacity)
 
+	tSignerExtract := time.Now()
 	signers, err := mp.signerExtractor.GetSigners(tx)
+	inserttrace.Observe(ctx, "priority_nonce_signer_extract", tSignerExtract)
 	if err != nil {
 		return err
 	}
@@ -246,11 +258,20 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 	}
 
 	signer := signers[0]
+	tBuildKey := time.Now()
 	sender := signer.Signer.String()
+	inserttrace.Observe(ctx, "priority_nonce_sender_string", tBuildKey)
+
+	tPriority := time.Now()
 	priority := mp.cfg.TxPriority.GetTxPriority(ctx, tx)
+	inserttrace.Observe(ctx, "priority_nonce_priority", tPriority)
+
+	tBuildMeta := time.Now()
 	nonce := signer.Sequence
 	key := txMeta[C]{nonce: nonce, priority: priority, sender: sender}
+	inserttrace.Observe(ctx, "priority_nonce_build_meta", tBuildMeta)
 
+	tSenderIndex := time.Now()
 	senderIndex, ok := mp.senderIndices[sender]
 	if !ok {
 		senderIndex = skiplist.New(skiplist.LessThanFunc(func(a, b any) int {
@@ -260,6 +281,7 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 		// initialize sender index if not found
 		mp.senderIndices[sender] = senderIndex
 	}
+	inserttrace.Observe(ctx, "priority_nonce_sender_index", tSenderIndex)
 
 	// Since mp.priorityIndex is scored by priority, then sender, then nonce, a
 	// changed priority will create a new key, so we must remove the old key and
@@ -268,9 +290,11 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 	//
 	// This O(log n) remove operation is rare and only happens when a tx's priority
 	// changes.
+	tReplacement := time.Now()
 	sk := txMeta[C]{nonce: nonce, sender: sender}
 	if oldScore, txExists := mp.scores[sk]; txExists {
 		if mp.cfg.TxReplacement != nil && !mp.cfg.TxReplacement(oldScore.priority, priority, senderIndex.Get(key).Value.(sdk.Tx), tx) {
+			inserttrace.Observe(ctx, "priority_nonce_replacement", tReplacement)
 			return fmt.Errorf(
 				"tx doesn't fit the replacement rule, oldPriority: %v, newPriority: %v, oldTx: %v, newTx: %v",
 				oldScore.priority,
@@ -288,7 +312,9 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 		})
 		mp.priorityCounts[oldScore.priority]--
 	}
+	inserttrace.Observe(ctx, "priority_nonce_replacement", tReplacement)
 
+	tIndexWrite := time.Now()
 	mp.priorityCounts[priority]++
 
 	// Since senderIndex is scored by nonce, a changed priority will overwrite the
@@ -297,6 +323,7 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 
 	mp.scores[sk] = txMeta[C]{priority: priority}
 	mp.priorityIndex.Set(key, tx)
+	inserttrace.Observe(ctx, "priority_nonce_index_write", tIndexWrite)
 
 	return nil
 }
