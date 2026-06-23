@@ -129,52 +129,54 @@ func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
 
 laneMatching:
 	for index, lane := range m.registry {
+		laneName := lane.Name()
 		tMatch := time.Now()
-		if lane.Match(sdkCtx, tx) {
-			inserttrace.Observe(ctx, "laned_match_"+lane.Name(), tMatch)
+		matched := lane.Match(sdkCtx, tx)
+		inserttrace.Observe(ctx, "laned_match_"+laneName, tMatch)
+		if !matched {
+			continue
+		}
 
-			tSignerExtract := time.Now()
-			signersData, err := lane.SignerExtractor().GetSigners(tx)
-			inserttrace.Observe(ctx, "laned_signer_extract_"+lane.Name(), tSignerExtract)
-			if err != nil {
-				m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", err)
-				return nil
-			}
-			tLowerLaneCheck := time.Now()
-			for _, signerData := range signersData {
-				if m.txIndex.DoesExistInLowerPriorityLane(signerData.Signer.String(), index) {
-
-					// If the transaction exists in a lower priority lane, do not insert it.
-					// This is because it could cause account sequence mismatches.
-					inserttrace.Observe(ctx, "laned_lower_lane_check_"+lane.Name(), tLowerLaneCheck)
-					continue laneMatching
-				}
-
-			}
-			inserttrace.Observe(ctx, "laned_lower_lane_check_"+lane.Name(), tLowerLaneCheck)
-
-			tLaneInsert := time.Now()
-			err = lane.Insert(ctx, tx)
-			inserttrace.Observe(ctx, "laned_lane_insert_"+lane.Name(), tLaneInsert)
-			if err != nil {
-				return err
-			}
-
-			tFirstSignerMeta := time.Now()
-			sig := signersData[0]
-			firstSignerIdentifier := sig.Signer.String()
-			firstSignerNonce := sig.Sequence
-			inserttrace.Observe(ctx, "laned_first_signer_meta_"+lane.Name(), tFirstSignerMeta)
-
-			tIndexUpdate := time.Now()
-			for _, signerData := range signersData {
-				m.txIndex.Insert(signerData.Signer.String(), lane.Name(), index, firstSignerIdentifier, firstSignerNonce)
-			}
-			inserttrace.Observe(ctx, "laned_index_update_"+lane.Name(), tIndexUpdate)
-
+		tSignerExtract := time.Now()
+		signersData, err := lane.SignerExtractor().GetSigners(tx)
+		inserttrace.Observe(ctx, "laned_signer_extract_"+laneName, tSignerExtract)
+		if err != nil {
+			m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", err)
 			return nil
 		}
-		inserttrace.Observe(ctx, "laned_match_"+lane.Name(), tMatch)
+		tLowerLaneCheck := time.Now()
+		for _, signerData := range signersData {
+			if m.txIndex.DoesExistInLowerPriorityLane(signerData.Signer.String(), index) {
+
+				// If the transaction exists in a lower priority lane, do not insert it.
+				// This is because it could cause account sequence mismatches.
+				inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
+				continue laneMatching
+			}
+
+		}
+		inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
+
+		tLaneInsert := time.Now()
+		err = lane.Insert(ctx, tx)
+		inserttrace.Observe(ctx, "laned_lane_insert_"+laneName, tLaneInsert)
+		if err != nil {
+			return err
+		}
+
+		tFirstSignerMeta := time.Now()
+		sig := signersData[0]
+		firstSignerIdentifier := sig.Signer.String()
+		firstSignerNonce := sig.Sequence
+		inserttrace.Observe(ctx, "laned_first_signer_meta_"+laneName, tFirstSignerMeta)
+
+		tIndexUpdate := time.Now()
+		for _, signerData := range signersData {
+			m.txIndex.Insert(signerData.Signer.String(), laneName, index, firstSignerIdentifier, firstSignerNonce)
+		}
+		inserttrace.Observe(ctx, "laned_index_update_"+laneName, tIndexUpdate)
+
+		return nil
 	}
 
 	return nil
