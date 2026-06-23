@@ -35,6 +35,10 @@ type BaseLane struct { //nolint
 	// should be processed by this lane.
 	matchHandler MatchHandler
 
+	// signerMatchHandler is the function that determines whether a transaction
+	// should be processed by this lane when signer data is already available.
+	signerMatchHandler SignerMatchHandler
+
 	// prepareLaneHandler is the function that is called when a new proposal is being
 	// requested and the lane needs to submit transactions it wants to be included in the block.
 	prepareLaneHandler PrepareLaneHandler
@@ -124,6 +128,16 @@ func (l *BaseLane) ValidateBasic() error {
 // list, it returns false.
 func (l *BaseLane) Match(ctx sdk.Context, tx sdk.Tx) bool {
 	return l.matchHandler(ctx, tx)
+}
+
+// MatchWithSigner returns true if the transaction should be processed by this
+// lane using the first signer address that was already extracted by the caller.
+func (l *BaseLane) MatchWithSigner(ctx sdk.Context, tx sdk.Tx, firstSigner string) bool {
+	if l.signerMatchHandler == nil {
+		return l.Match(ctx, tx)
+	}
+
+	return l.signerMatchHandler(ctx, tx, firstSigner)
 }
 
 // Name returns the name of the lane.

@@ -12,6 +12,10 @@ type (
 	// function can be a stateless or stateful check on the transaction.
 	MatchHandler func(ctx sdk.Context, tx sdk.Tx) bool
 
+	// SignerMatchHandler is utilized to determine if a transaction should be
+	// included in the lane when the first signer address has already been extracted.
+	SignerMatchHandler func(ctx sdk.Context, tx sdk.Tx, firstSigner string) bool
+
 	// PrepareLaneHandler is responsible for preparing transactions to be included in the block from a
 	// given lane. Given a lane, this function should return the transactions to include in the block,
 	// the pre-computed TxWithInfo for each included tx (nil if not available, caller should fall back

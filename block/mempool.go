@@ -67,6 +67,10 @@ type (
 	batchSignerAwareLane interface {
 		ContainsManyWithSigners([]sdk.Tx, [][]signer_extraction.SignerData) []bool
 	}
+
+	signerMatchLane interface {
+		MatchWithSigner(sdk.Context, sdk.Tx, string) bool
+	}
 )
 
 // NewLanedMempool returns a new Block SDK LanedMempool. The laned mempool comprises
@@ -116,7 +120,6 @@ func (m *LanedMempool) GetTxDistribution() map[string]uint64 {
 // Insert will insert a transaction into the mempool. It inserts the transaction
 // into the first lane that it matches.
 func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
-	tInsertSetup := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
 			m.logger.Error("panic in Insert", "err", r)
@@ -125,28 +128,48 @@ func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
 	}()
 
 	sdkCtx := sdk.UnwrapSDKContext(ctx)
-	inserttrace.Observe(ctx, "laned_setup", tInsertSetup)
+	if len(m.registry) == 0 {
+		return nil
+	}
+
+	tSignerExtract := time.Now()
+	signersData, err := m.registry[0].SignerExtractor().GetSigners(tx)
+	inserttrace.Observe(ctx, "laned_signer_extract", tSignerExtract)
+	if err != nil {
+		m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", err)
+		return nil
+	}
+	if len(signersData) == 0 {
+		m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", "no signers")
+		return nil
+	}
+	signerIdentifiers := make([]string, len(signersData))
+	for i, signerData := range signersData {
+		signerIdentifiers[i] = signerData.Signer.String()
+	}
+	firstSignerIdentifier := signerIdentifiers[0]
 
 laneMatching:
 	for index, lane := range m.registry {
 		laneName := lane.Name()
 		tMatch := time.Now()
-		matched := lane.Match(sdkCtx, tx)
-		inserttrace.Observe(ctx, "laned_match_"+laneName, tMatch)
-		if !matched {
-			continue
+		if signerMatcher, ok := lane.(signerMatchLane); ok {
+			matched := signerMatcher.MatchWithSigner(sdkCtx, tx, firstSignerIdentifier)
+			inserttrace.Observe(ctx, "laned_match_"+laneName, tMatch)
+			if !matched {
+				continue
+			}
+		} else {
+			matched := lane.Match(sdkCtx, tx)
+			inserttrace.Observe(ctx, "laned_match_"+laneName, tMatch)
+			if !matched {
+				continue
+			}
 		}
 
-		tSignerExtract := time.Now()
-		signersData, err := lane.SignerExtractor().GetSigners(tx)
-		inserttrace.Observe(ctx, "laned_signer_extract_"+laneName, tSignerExtract)
-		if err != nil {
-			m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", err)
-			return nil
-		}
 		tLowerLaneCheck := time.Now()
-		for _, signerData := range signersData {
-			if m.txIndex.DoesExistInLowerPriorityLane(signerData.Signer.String(), index) {
+		for _, signerIdentifier := range signerIdentifiers {
+			if m.txIndex.DoesExistInLowerPriorityLane(signerIdentifier, index) {
 
 				// If the transaction exists in a lower priority lane, do not insert it.
 				// This is because it could cause account sequence mismatches.
@@ -166,13 +189,12 @@ laneMatching:
 
 		tFirstSignerMeta := time.Now()
 		sig := signersData[0]
-		firstSignerIdentifier := sig.Signer.String()
 		firstSignerNonce := sig.Sequence
 		inserttrace.Observe(ctx, "laned_first_signer_meta_"+laneName, tFirstSignerMeta)
 
 		tIndexUpdate := time.Now()
-		for _, signerData := range signersData {
-			m.txIndex.Insert(signerData.Signer.String(), laneName, index, firstSignerIdentifier, firstSignerNonce)
+		for _, signerIdentifier := range signerIdentifiers {
+			m.txIndex.Insert(signerIdentifier, laneName, index, firstSignerIdentifier, firstSignerNonce)
 		}
 		inserttrace.Observe(ctx, "laned_index_update_"+laneName, tIndexUpdate)
 
