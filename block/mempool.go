@@ -116,6 +116,7 @@ func (m *LanedMempool) GetTxDistribution() map[string]uint64 {
 // Insert will insert a transaction into the mempool. It inserts the transaction
 // into the first lane that it matches.
 func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
+	tInsertSetup := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
 			m.logger.Error("panic in Insert", "err", r)
@@ -124,6 +125,7 @@ func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
 	}()
 
 	sdkCtx := sdk.UnwrapSDKContext(ctx)
+	inserttrace.Observe(ctx, "laned_setup", tInsertSetup)
 
 laneMatching:
 	for index, lane := range m.registry {
@@ -158,9 +160,11 @@ laneMatching:
 				return err
 			}
 
+			tFirstSignerMeta := time.Now()
 			sig := signersData[0]
 			firstSignerIdentifier := sig.Signer.String()
 			firstSignerNonce := sig.Sequence
+			inserttrace.Observe(ctx, "laned_first_signer_meta_"+lane.Name(), tFirstSignerMeta)
 
 			tIndexUpdate := time.Now()
 			for _, signerData := range signersData {
