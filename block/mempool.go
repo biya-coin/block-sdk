@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
-	"time"
 
 	"cosmossdk.io/log"
 	"cosmossdk.io/math"
@@ -14,7 +13,6 @@ import (
 	sdkmempool "github.com/cosmos/cosmos-sdk/types/mempool"
 
 	signer_extraction "github.com/skip-mev/block-sdk/v2/adapters/signer_extraction_adapter"
-	"github.com/skip-mev/block-sdk/v2/block/inserttrace"
 )
 
 var _ Mempool = (*LanedMempool)(nil)
@@ -136,7 +134,10 @@ func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
 		return nil
 	}
 
-	tMatchUntilFound := time.Now()
+	// laned_match_until_found: 14ms
+	// laned_lower_lane_check:  6ms
+	// laned_lane_insert:       67ms
+	// tMatchUntilFound := time.Now()
 	signersData, err := m.registry[0].SignerExtractor().GetSigners(tx)
 	if err != nil {
 		m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", err)
@@ -166,26 +167,26 @@ laneMatching:
 				continue
 			}
 		}
-		inserttrace.Observe(ctx, "laned_match_until_found", tMatchUntilFound)
+		// inserttrace.Observe(ctx, "laned_match_until_found", tMatchUntilFound)
 
-		tLowerLaneCheck := time.Now()
+		// tLowerLaneCheck := time.Now()
 		for _, signerIdentifier := range signerIdentifiers {
 			if m.txIndex.DoesExistInLowerPriorityLane(signerIdentifier, index) {
 
 				// If the transaction exists in a lower priority lane, do not insert it.
 				// This is because it could cause account sequence mismatches.
-				inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
+				// inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
 				continue laneMatching
 			}
 
 		}
-		inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
+		// inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
 
-		tLaneInsert := time.Now()
+		// tLaneInsert := time.Now()
 		sig := signersData[0]
 		firstSignerNonce := sig.Sequence
 		err = m.laneInsertWithSenderNonce(ctx, lane, tx, firstSignerIdentifier, firstSignerNonce)
-		inserttrace.Observe(ctx, "laned_lane_insert_"+laneName, tLaneInsert)
+		// inserttrace.Observe(ctx, "laned_lane_insert_"+laneName, tLaneInsert)
 		if err != nil {
 			return err
 		}
