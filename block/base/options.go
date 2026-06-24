@@ -68,6 +68,18 @@ func WithMatchHandler(matchHandler MatchHandler) LaneOption {
 	}
 }
 
+// WithSignerMatchHandler sets the signer-aware match handler for the lane. This
+// handler is used when the caller has already extracted the first signer address.
+func WithSignerMatchHandler(matchHandler SignerMatchHandler) LaneOption {
+	return func(l *BaseLane) {
+		if matchHandler == nil {
+			panic("signer match handler cannot be nil")
+		}
+
+		l.signerMatchHandler = matchHandler
+	}
+}
+
 // WithMempool sets the mempool for the lane. This mempool is used to store
 // transactions that are waiting to be processed.
 func WithMempool(mempool block.LaneMempool) LaneOption {

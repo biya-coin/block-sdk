@@ -57,6 +57,10 @@ type (
 		txIndex *TxIndex
 	}
 
+	senderNonceInsertLane interface {
+		InsertWithSenderNonce(context.Context, sdk.Tx, string, uint64) error
+	}
+
 	signerAwareLane interface {
 		ContainsWithSigners(sdk.Tx, []signer_extraction.SignerData) bool
 		RemoveWithSigners(sdk.Tx, []signer_extraction.SignerData) error
@@ -64,6 +68,10 @@ type (
 
 	batchSignerAwareLane interface {
 		ContainsManyWithSigners([]sdk.Tx, [][]signer_extraction.SignerData) []bool
+	}
+
+	signerMatchLane interface {
+		MatchWithSigner(sdk.Context, sdk.Tx, string) bool
 	}
 )
 
@@ -131,40 +139,72 @@ func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
 	}()
 
 	sdkCtx := sdk.UnwrapSDKContext(ctx)
+	if len(m.registry) == 0 {
+		return nil
+	}
+
+	// laned_match_until_found: 14ms
+	// laned_lower_lane_check:  6ms
+	// laned_lane_insert:       67ms
+	// tMatchUntilFound := time.Now()
+	signersData, err := m.registry[0].SignerExtractor().GetSigners(tx)
+	if err != nil {
+		m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", err)
+		return nil
+	}
+	if len(signersData) == 0 {
+		m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", "no signers")
+		return nil
+	}
+	signerIdentifiers := make([]string, len(signersData))
+	for i, signerData := range signersData {
+		signerIdentifiers[i] = signerData.Signer.String()
+	}
+	firstSignerIdentifier := signerIdentifiers[0]
 
 laneMatching:
 	for index, lane := range m.registry {
-		if lane.Match(sdkCtx, tx) {
-			signersData, err := lane.SignerExtractor().GetSigners(tx)
-			if err != nil {
-				m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", err)
-				return nil
+		laneName := lane.Name()
+		if signerMatcher, ok := lane.(signerMatchLane); ok {
+			matched := signerMatcher.MatchWithSigner(sdkCtx, tx, firstSignerIdentifier)
+			if !matched {
+				continue
 			}
-			for _, signerData := range signersData {
-				if m.txIndex.DoesExistInLowerPriorityLane(signerData.Signer.String(), index) {
-
-					// If the transaction exists in a lower priority lane, do not insert it.
-					// This is because it could cause account sequence mismatches.
-					continue laneMatching
-				}
-
+		} else {
+			matched := lane.Match(sdkCtx, tx)
+			if !matched {
+				continue
 			}
-
-			err = lane.Insert(ctx, tx)
-			if err != nil {
-				return err
-			}
-
-			sig := signersData[0]
-			firstSignerIdentifier := sig.Signer.String()
-			firstSignerNonce := sig.Sequence
-
-			for _, signerData := range signersData {
-				m.txIndex.Insert(signerData.Signer.String(), lane.Name(), index, firstSignerIdentifier, firstSignerNonce)
-			}
-
-			return nil
 		}
+		// inserttrace.Observe(ctx, "laned_match_until_found", tMatchUntilFound)
+
+		// tLowerLaneCheck := time.Now()
+		for _, signerIdentifier := range signerIdentifiers {
+			if m.txIndex.DoesExistInLowerPriorityLane(signerIdentifier, index) {
+
+				// If the transaction exists in a lower priority lane, do not insert it.
+				// This is because it could cause account sequence mismatches.
+				// inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
+				continue laneMatching
+			}
+
+		}
+		// inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
+
+		// tLaneInsert := time.Now()
+		sig := signersData[0]
+		firstSignerNonce := sig.Sequence
+		err = m.laneInsertWithSenderNonce(ctx, lane, tx, firstSignerIdentifier, firstSignerNonce)
+		// inserttrace.Observe(ctx, "laned_lane_insert_"+laneName, tLaneInsert)
+		if err != nil {
+			return err
+		}
+
+		for _, signerIdentifier := range signerIdentifiers {
+			m.txIndex.Insert(signerIdentifier, laneName, index, firstSignerIdentifier, firstSignerNonce)
+		}
+
+		return nil
 	}
 
 	return nil
@@ -504,6 +544,14 @@ func (m *LanedMempool) laneContainsWithSigners(lane Lane, tx sdk.Tx, signers []s
 	}
 
 	return lane.Contains(tx)
+}
+
+func (m *LanedMempool) laneInsertWithSenderNonce(ctx context.Context, lane Lane, tx sdk.Tx, sender string, nonce uint64) error {
+	if aware, ok := lane.(senderNonceInsertLane); ok {
+		return aware.InsertWithSenderNonce(ctx, tx, sender, nonce)
+	}
+
+	return lane.Insert(ctx, tx)
 }
 
 func (m *LanedMempool) laneContainsManyWithSigners(lane Lane, txs []sdk.Tx, signersList [][]signer_extraction.SignerData) []bool {
