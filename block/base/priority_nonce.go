@@ -230,24 +230,18 @@ func (mp *PriorityNonceMempool[C]) NextSenderTx(sender string) sdk.Tx {
 // Inserting a duplicate tx with a different priority overwrites the existing tx,
 // changing the total order of the mempool.
 func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error {
-	tInsertSetup := time.Now()
 	tLockWait := time.Now()
-	inserttrace.Observe(ctx, "priority_nonce_setup", tInsertSetup)
 	mp.mux.Lock()
 	inserttrace.Observe(ctx, "priority_nonce_lock_wait", tLockWait)
 	tLockHeld := time.Now()
 	defer mp.mux.Unlock()
 	defer inserttrace.Observe(ctx, "priority_nonce_lock_held", tLockHeld)
 
-	tCapacity := time.Now()
 	if mp.cfg.MaxTx > 0 && mp.priorityIndex.Len() >= mp.cfg.MaxTx {
-		inserttrace.Observe(ctx, "priority_nonce_capacity_check", tCapacity)
 		return sdkmempool.ErrMempoolTxMaxCapacity
 	} else if mp.cfg.MaxTx < 0 {
-		inserttrace.Observe(ctx, "priority_nonce_capacity_check", tCapacity)
 		return nil
 	}
-	inserttrace.Observe(ctx, "priority_nonce_capacity_check", tCapacity)
 
 	tSignerExtract := time.Now()
 	signers, err := mp.signerExtractor.GetSigners(tx)
@@ -316,9 +310,7 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 	}
 	inserttrace.Observe(ctx, "priority_nonce_replacement", tReplacement)
 
-	tIndexWrite := time.Now()
 	mp.priorityCounts[priority]++
-	inserttrace.Observe(ctx, "priority_nonce_priority_count_write", tIndexWrite)
 
 	// Since senderIndex is scored by nonce, a changed priority will overwrite the
 	// existing key.
@@ -326,14 +318,11 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 	key.senderElement = senderIndex.Set(key, tx)
 	inserttrace.Observe(ctx, "priority_nonce_sender_set", tSenderSet)
 
-	tScoreWrite := time.Now()
 	mp.scores[sk] = txMeta[C]{priority: priority}
-	inserttrace.Observe(ctx, "priority_nonce_score_write", tScoreWrite)
 
 	tPrioritySet := time.Now()
 	mp.priorityIndex.Set(key, tx)
 	inserttrace.Observe(ctx, "priority_nonce_priority_set", tPrioritySet)
-	inserttrace.Observe(ctx, "priority_nonce_index_write", tIndexWrite)
 
 	return nil
 }
