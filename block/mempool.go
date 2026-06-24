@@ -136,9 +136,8 @@ func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
 		return nil
 	}
 
-	tSignerExtract := time.Now()
+	tMatchUntilFound := time.Now()
 	signersData, err := m.registry[0].SignerExtractor().GetSigners(tx)
-	inserttrace.Observe(ctx, "laned_signer_extract", tSignerExtract)
 	if err != nil {
 		m.logger.Error("failed to extract signers upon insertion for tx", "tx", tx, "err", err)
 		return nil
@@ -156,20 +155,18 @@ func (m *LanedMempool) Insert(ctx context.Context, tx sdk.Tx) (err error) {
 laneMatching:
 	for index, lane := range m.registry {
 		laneName := lane.Name()
-		tMatch := time.Now()
 		if signerMatcher, ok := lane.(signerMatchLane); ok {
 			matched := signerMatcher.MatchWithSigner(sdkCtx, tx, firstSignerIdentifier)
-			inserttrace.Observe(ctx, "laned_match_"+laneName, tMatch)
 			if !matched {
 				continue
 			}
 		} else {
 			matched := lane.Match(sdkCtx, tx)
-			inserttrace.Observe(ctx, "laned_match_"+laneName, tMatch)
 			if !matched {
 				continue
 			}
 		}
+		inserttrace.Observe(ctx, "laned_match_until_found", tMatchUntilFound)
 
 		tLowerLaneCheck := time.Now()
 		for _, signerIdentifier := range signerIdentifiers {
