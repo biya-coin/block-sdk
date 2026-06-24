@@ -273,15 +273,11 @@ func (mp *PriorityNonceMempool[C]) InsertWithSenderNonce(ctx context.Context, tx
 }
 
 func (mp *PriorityNonceMempool[C]) insertWithSenderNonceLocked(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
-	tPriority := time.Now()
-	priority := mp.cfg.TxPriority.GetTxPriority(ctx, tx)
-	inserttrace.Observe(ctx, "priority_nonce_priority", tPriority)
-
-	tBuildMeta := time.Now()
+	// priority := mp.cfg.TxPriority.GetTxPriority(ctx, tx)
+	var priority C
+	// 去掉优先级机制，最终应该是按时间顺序排序
 	key := txMeta[C]{nonce: nonce, priority: priority, sender: sender}
-	inserttrace.Observe(ctx, "priority_nonce_build_meta", tBuildMeta)
 
-	tSenderIndex := time.Now()
 	senderIndex, ok := mp.senderIndices[sender]
 	if !ok {
 		senderIndex = skiplist.New(skiplist.LessThanFunc(func(a, b any) int {
@@ -291,7 +287,6 @@ func (mp *PriorityNonceMempool[C]) insertWithSenderNonceLocked(ctx context.Conte
 		// initialize sender index if not found
 		mp.senderIndices[sender] = senderIndex
 	}
-	inserttrace.Observe(ctx, "priority_nonce_sender_index", tSenderIndex)
 
 	// Since mp.priorityIndex is scored by priority, then sender, then nonce, a
 	// changed priority will create a new key, so we must remove the old key and
