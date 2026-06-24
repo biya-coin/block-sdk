@@ -93,50 +93,12 @@ func (m MempoolParityCheckTx) CheckTx() CheckTx {
 			), nil
 		}
 
-		isReCheck := req.Type == cometabci.CHECK_TX_TYPE_RECHECK
-		txInMempool := m.mempl.Contains(tx)
-
-		// if the mode is ReCheck and the app's mempool does not contain the given tx, we fail
-		// immediately, to purge the tx from the comet mempool.
-		if isReCheck && !txInMempool {
-			m.logger.Debug(
-				"tx from comet mempool not found in app-side mempool",
-				"tx", tx,
-			)
-
-			return sdkerrors.CheckTxResponseWithEvents(
-				fmt.Errorf("tx from comet mempool not found in app-side mempool"),
-				0,
-				0,
-				nil,
-				false,
-			), nil
-		}
-
-		// prepare cleanup closure to remove tx if marked
-		removeTx := false
-		defer func() {
-			if removeTx {
-				// remove the tx
-				if err := m.mempl.Remove(tx); err != nil {
-					m.logger.Debug(
-						"failed to remove tx from app-side mempool when purging for re-check failure",
-						"removal-err", err,
-					)
-				}
-			}
-		}()
-
 		// run the checkTxHandler
 		res, checkTxError := m.checkTxHandler(req)
 
 		// can fail for a variety of reasons, check the results of the checkTxHandler
 		// need to remove from mempool if re-check fails and tx is in mempool.
 		if isInvalidCheckTxExecution(res, checkTxError) {
-			if isReCheck && txInMempool {
-				removeTx = true
-			}
-
 			m.logger.Debug("failed base checkTx", "err", checkTxError, "res", fmt.Sprintf("%+v", res))
 			return res, checkTxError
 		}
@@ -144,9 +106,6 @@ func (m MempoolParityCheckTx) CheckTx() CheckTx {
 		sdkCtx := m.GetContextForTx(req)
 		lane, err := m.matchLane(sdkCtx, tx)
 		if err != nil {
-			if isReCheck && txInMempool {
-				removeTx = true
-			}
 
 			m.logger.Debug("failed to match lane", "lane", lane, "err", err)
 			return sdkerrors.CheckTxResponseWithEvents(
@@ -172,10 +131,6 @@ func (m MempoolParityCheckTx) CheckTx() CheckTx {
 
 		txSize := int64(len(req.Tx))
 		if txSize > laneSizeBytes {
-			if isReCheck && txInMempool {
-				removeTx = true
-			}
-
 			m.logger.Debug(
 				"tx size exceeds max lane size bytes",
 				"tx", tx,
