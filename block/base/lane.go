@@ -1,6 +1,7 @@
 package base
 
 import (
+	"context"
 	"fmt"
 
 	"cosmossdk.io/log"
@@ -163,6 +164,19 @@ func (l *BaseLane) TxEncoder() sdk.TxEncoder {
 // SignerExtractor returns the signer extractor for the lane.
 func (l *BaseLane) SignerExtractor() signer_extraction.Adapter {
 	return l.cfg.SignerExtractor
+}
+
+// InsertWithSenderNonce inserts a transaction into the lane using sender/nonce
+// data that was already extracted by the caller.
+func (l *BaseLane) InsertWithSenderNonce(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
+	mempool, ok := l.LaneMempool.(interface {
+		InsertWithSenderNonce(context.Context, sdk.Tx, string, uint64) error
+	})
+	if !ok {
+		return l.Insert(ctx, tx)
+	}
+
+	return mempool.InsertWithSenderNonce(ctx, tx, sender, nonce)
 }
 
 // ContainsWithSigners returns true if the transaction is contained in the lane

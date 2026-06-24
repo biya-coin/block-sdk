@@ -230,6 +230,32 @@ func (mp *PriorityNonceMempool[C]) NextSenderTx(sender string) sdk.Tx {
 // Inserting a duplicate tx with a different priority overwrites the existing tx,
 // changing the total order of the mempool.
 func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error {
+	mp.mux.Lock()
+	defer mp.mux.Unlock()
+
+	if mp.cfg.MaxTx > 0 && mp.priorityIndex.Len() >= mp.cfg.MaxTx {
+		return sdkmempool.ErrMempoolTxMaxCapacity
+	} else if mp.cfg.MaxTx < 0 {
+		return nil
+	}
+
+	signers, err := mp.signerExtractor.GetSigners(tx)
+	if err != nil {
+		return err
+	}
+	if len(signers) == 0 {
+		return fmt.Errorf("tx must have at least one signer")
+	}
+
+	signer := signers[0]
+	sender := signer.Signer.String()
+
+	return mp.insertWithSenderNonceLocked(ctx, tx, sender, signer.Sequence)
+}
+
+// InsertWithSenderNonce inserts a transaction using sender/nonce data that was
+// already extracted by the caller.
+func (mp *PriorityNonceMempool[C]) InsertWithSenderNonce(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
 	tLockWait := time.Now()
 	mp.mux.Lock()
 	inserttrace.Observe(ctx, "priority_nonce_lock_wait", tLockWait)
@@ -243,27 +269,15 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 		return nil
 	}
 
-	tSignerExtract := time.Now()
-	signers, err := mp.signerExtractor.GetSigners(tx)
-	inserttrace.Observe(ctx, "priority_nonce_signer_extract", tSignerExtract)
-	if err != nil {
-		return err
-	}
-	if len(signers) == 0 {
-		return fmt.Errorf("tx must have at least one signer")
-	}
+	return mp.insertWithSenderNonceLocked(ctx, tx, sender, nonce)
+}
 
-	signer := signers[0]
-	tBuildKey := time.Now()
-	sender := signer.Signer.String()
-	inserttrace.Observe(ctx, "priority_nonce_sender_string", tBuildKey)
-
+func (mp *PriorityNonceMempool[C]) insertWithSenderNonceLocked(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
 	tPriority := time.Now()
 	priority := mp.cfg.TxPriority.GetTxPriority(ctx, tx)
 	inserttrace.Observe(ctx, "priority_nonce_priority", tPriority)
 
 	tBuildMeta := time.Now()
-	nonce := signer.Sequence
 	key := txMeta[C]{nonce: nonce, priority: priority, sender: sender}
 	inserttrace.Observe(ctx, "priority_nonce_build_meta", tBuildMeta)
 

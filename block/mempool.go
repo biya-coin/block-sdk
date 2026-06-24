@@ -59,6 +59,10 @@ type (
 		txIndex *TxIndex
 	}
 
+	senderNonceInsertLane interface {
+		InsertWithSenderNonce(context.Context, sdk.Tx, string, uint64) error
+	}
+
 	signerAwareLane interface {
 		ContainsWithSigners(sdk.Tx, []signer_extraction.SignerData) bool
 		RemoveWithSigners(sdk.Tx, []signer_extraction.SignerData) error
@@ -181,14 +185,13 @@ laneMatching:
 		inserttrace.Observe(ctx, "laned_lower_lane_check_"+laneName, tLowerLaneCheck)
 
 		tLaneInsert := time.Now()
-		err = lane.Insert(ctx, tx)
+		sig := signersData[0]
+		firstSignerNonce := sig.Sequence
+		err = m.laneInsertWithSenderNonce(ctx, lane, tx, firstSignerIdentifier, firstSignerNonce)
 		inserttrace.Observe(ctx, "laned_lane_insert_"+laneName, tLaneInsert)
 		if err != nil {
 			return err
 		}
-
-		sig := signersData[0]
-		firstSignerNonce := sig.Sequence
 
 		for _, signerIdentifier := range signerIdentifiers {
 			m.txIndex.Insert(signerIdentifier, laneName, index, firstSignerIdentifier, firstSignerNonce)
@@ -522,6 +525,14 @@ func (m *LanedMempool) laneContainsWithSigners(lane Lane, tx sdk.Tx, signers []s
 	}
 
 	return lane.Contains(tx)
+}
+
+func (m *LanedMempool) laneInsertWithSenderNonce(ctx context.Context, lane Lane, tx sdk.Tx, sender string, nonce uint64) error {
+	if aware, ok := lane.(senderNonceInsertLane); ok {
+		return aware.InsertWithSenderNonce(ctx, tx, sender, nonce)
+	}
+
+	return lane.Insert(ctx, tx)
 }
 
 func (m *LanedMempool) laneContainsManyWithSigners(lane Lane, txs []sdk.Tx, signersList [][]signer_extraction.SignerData) []bool {

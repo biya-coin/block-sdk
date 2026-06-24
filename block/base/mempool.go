@@ -32,6 +32,10 @@ type (
 		txPriority TxPriority[C]
 	}
 
+	senderNonceInsertMempool interface {
+		InsertWithSenderNonce(context.Context, sdk.Tx, string, uint64) error
+	}
+
 	signerAwareMempool interface {
 		ContainsWithSigners(sdk.Tx, []signer_extraction.SignerData) bool
 		ContainsManyWithSigners([][]signer_extraction.SignerData) []bool
@@ -65,6 +69,21 @@ func (cm *Mempool[C]) Priority(ctx sdk.Context, tx sdk.Tx) any {
 // Insert inserts a transaction into the mempool.
 func (cm *Mempool[C]) Insert(ctx context.Context, tx sdk.Tx) error {
 	if err := cm.index.Insert(ctx, tx); err != nil {
+		return fmt.Errorf("failed to insert tx into mempool: %w", err)
+	}
+
+	return nil
+}
+
+// InsertWithSenderNonce inserts a transaction using sender/nonce data that was
+// already extracted by the caller.
+func (cm *Mempool[C]) InsertWithSenderNonce(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
+	index, ok := cm.index.(senderNonceInsertMempool)
+	if !ok {
+		return cm.Insert(ctx, tx)
+	}
+
+	if err := index.InsertWithSenderNonce(ctx, tx, sender, nonce); err != nil {
 		return fmt.Errorf("failed to insert tx into mempool: %w", err)
 	}
 
