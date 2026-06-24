@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"math"
 	"sync"
-	"time"
 
 	"github.com/huandu/skiplist"
 
@@ -25,7 +24,6 @@ import (
 	sdkmempool "github.com/cosmos/cosmos-sdk/types/mempool"
 
 	signer_extraction "github.com/skip-mev/block-sdk/v2/adapters/signer_extraction_adapter"
-	"github.com/skip-mev/block-sdk/v2/block/inserttrace"
 )
 
 var (
@@ -256,12 +254,15 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 // InsertWithSenderNonce inserts a transaction using sender/nonce data that was
 // already extracted by the caller.
 func (mp *PriorityNonceMempool[C]) InsertWithSenderNonce(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
-	tLockWait := time.Now()
+	// priority_nonce_lock_wait: 5ms
+	// priority_nonce_lock_held: 56ms (4+13+40)
+	// InsertWithSenderNonce ≈ 61ms
+	// tLockWait := time.Now()
 	mp.mux.Lock()
-	inserttrace.Observe(ctx, "priority_nonce_lock_wait", tLockWait)
-	tLockHeld := time.Now()
+	// inserttrace.Observe(ctx, "priority_nonce_lock_wait", tLockWait)
+	// tLockHeld := time.Now()
 	defer mp.mux.Unlock()
-	defer inserttrace.Observe(ctx, "priority_nonce_lock_held", tLockHeld)
+	// defer inserttrace.Observe(ctx, "priority_nonce_lock_held", tLockHeld)
 
 	if mp.cfg.MaxTx > 0 && mp.priorityIndex.Len() >= mp.cfg.MaxTx {
 		return sdkmempool.ErrMempoolTxMaxCapacity
