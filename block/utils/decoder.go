@@ -15,7 +15,7 @@ var DefaultMaxSize uint64 = 500
 // as the key. The cache is purged when the number of transactions in the cache
 // exceeds the maximum size. The oldest transactions are removed first.
 type CacheTxDecoder struct {
-	mut sync.Mutex
+	mut sync.RWMutex
 
 	decoder     sdk.TxDecoder
 	cache       map[string]sdk.Tx
@@ -66,17 +66,26 @@ func NewCacheTxDecoder(
 // transaction using the transaction's hash as the key.
 func (ctd *CacheTxDecoder) TxDecoder() sdk.TxDecoder {
 	return func(txBytes []byte) (sdk.Tx, error) {
-		ctd.mut.Lock()
-		defer ctd.mut.Unlock()
-
 		hash := TxHash(txBytes)
+
+		ctd.mut.RLock()
 		if tx, ok := ctd.cache[hash]; ok {
+			ctd.mut.RUnlock()
 			return tx, nil
 		}
+		ctd.mut.RUnlock()
 
+		// Decode outside the write lock so different misses can run in parallel.
 		tx, err := ctd.decoder(txBytes)
 		if err != nil {
 			return nil, err
+		}
+
+		ctd.mut.Lock()
+		defer ctd.mut.Unlock()
+
+		if cachedTx, ok := ctd.cache[hash]; ok {
+			return cachedTx, nil
 		}
 
 		// Purge the cache if necessary
@@ -104,18 +113,19 @@ func (ctd *CacheTxDecoder) TxDecoder() sdk.TxDecoder {
 
 // Len returns the number of transactions in the cache.
 func (ctd *CacheTxDecoder) Len() int {
-	ctd.mut.Lock()
-	defer ctd.mut.Unlock()
+	ctd.mut.RLock()
+	defer ctd.mut.RUnlock()
 
 	return len(ctd.cache)
 }
 
 // Contains returns true if the cache contains the transaction with the given hash.
 func (ctd *CacheTxDecoder) Contains(txBytes []byte) bool {
-	ctd.mut.Lock()
-	defer ctd.mut.Unlock()
-
 	hash := TxHash(txBytes)
+
+	ctd.mut.RLock()
+	defer ctd.mut.RUnlock()
+
 	_, ok := ctd.cache[hash]
 	return ok
 }
