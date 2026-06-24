@@ -67,6 +67,15 @@ type (
 	}
 )
 
+// FirstSignerBytes returns the first signer address for callers that keep
+// TxSignerInfo opaque.
+func (i TxSignerInfo) FirstSignerBytes() []byte {
+	if i.Err != nil || len(i.Signers) == 0 {
+		return nil
+	}
+	return i.Signers[0].Signer
+}
+
 // NewLanedMempool returns a new Block SDK LanedMempool. The laned mempool comprises
 // a registry of lanes. Each lane is responsible for selecting transactions according
 // to its own selection logic. The lanes are ordered according to their priority. The
@@ -265,6 +274,18 @@ func (m *LanedMempool) PreExtractSigners(txs []sdk.Tx) []TxSignerInfo {
 	wg.Wait()
 
 	return infos
+}
+
+// PreExtractSignerInfoForTx extracts signer data for a single transaction.
+func (m *LanedMempool) PreExtractSignerInfoForTx(tx sdk.Tx, index int) any {
+	signers, err := m.extractSignersForRemoval(tx)
+	return TxSignerInfo{
+		Index:     index,
+		Tx:        tx,
+		Signers:   signers,
+		LaneIndex: -1,
+		Err:       err,
+	}
 }
 
 // PreExtractSignerInfo extracts signer data for callers that should not import
