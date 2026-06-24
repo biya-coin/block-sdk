@@ -187,16 +187,12 @@ laneMatching:
 			return err
 		}
 
-		tFirstSignerMeta := time.Now()
 		sig := signersData[0]
 		firstSignerNonce := sig.Sequence
-		inserttrace.Observe(ctx, "laned_first_signer_meta_"+laneName, tFirstSignerMeta)
 
-		tIndexUpdate := time.Now()
 		for _, signerIdentifier := range signerIdentifiers {
 			m.txIndex.Insert(signerIdentifier, laneName, index, firstSignerIdentifier, firstSignerNonce)
 		}
-		inserttrace.Observe(ctx, "laned_index_update_"+laneName, tIndexUpdate)
 
 		return nil
 	}
