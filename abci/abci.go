@@ -11,6 +11,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/baseapp"
 
 	"github.com/skip-mev/block-sdk/v2/block"
+	skipbase "github.com/skip-mev/block-sdk/v2/block/base"
 	"github.com/skip-mev/block-sdk/v2/block/proposals"
 	"github.com/skip-mev/block-sdk/v2/block/utils"
 )
@@ -98,6 +99,21 @@ func (h *ProposalHandler) PrepareProposalHandler() sdk.PrepareProposalHandler {
 
 		// Get the max gas limit and max block size for the proposal.
 		_, maxGasLimit := proposals.GetBlockLimits(ctx)
+		reserved, err := h.buildReservedNonceSet(req.Txs)
+		if err != nil {
+			h.logger.Error("failed to build reserved nonce set", "err", err, "height", req.Height)
+			return &abci.PrepareProposalResponse{Txs: make([][]byte, 0)}, err
+		}
+		if !reserved.Empty() {
+			h.logger.Info(
+				"prepare proposal reserved parent nonces",
+				"height", req.Height,
+				"reserved_parent_txs", len(req.Txs),
+				"reserved_senders", reserved.NumSenders(),
+				"reserved_nonces", reserved.NumNonces(),
+			)
+		}
+		ctx = skipbase.WithReservedNonceSet(ctx, reserved)
 		proposal := proposals.NewProposal(h.logger, req.MaxTxBytes, maxGasLimit)
 
 		// Fill the proposal with transactions from each lane.
@@ -133,6 +149,52 @@ func (h *ProposalHandler) PrepareProposalHandler() sdk.PrepareProposalHandler {
 			Txs: finalProposal.Txs,
 		}, nil
 	}
+}
+
+func (h *ProposalHandler) buildReservedNonceSet(rawTxs [][]byte) (*skipbase.ReservedNonceSet, error) {
+	reserved := skipbase.NewReservedNonceSet()
+	if len(rawTxs) == 0 {
+		return reserved, nil
+	}
+
+	registry := h.mempool.Registry()
+	for _, txBz := range rawTxs {
+		tx, err := h.txDecoder(txBz)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode reserved parent tx: %w", err)
+		}
+
+		var lastErr error
+		var extracted bool
+		for _, lane := range registry {
+			extractor := lane.SignerExtractor()
+			if extractor == nil {
+				continue
+			}
+			signers, err := extractor.GetSigners(tx)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if len(signers) == 0 {
+				lastErr = fmt.Errorf("signer extractor returned no signers")
+				continue
+			}
+			for _, signer := range signers {
+				reserved.Add(signer.Signer.String(), signer.Sequence)
+			}
+			extracted = true
+			break
+		}
+		if !extracted {
+			if lastErr != nil {
+				return nil, fmt.Errorf("failed to extract signers from reserved parent tx: %w", lastErr)
+			}
+			return nil, fmt.Errorf("failed to extract signers from reserved parent tx")
+		}
+	}
+
+	return reserved, nil
 }
 
 // ProcessProposalHandler processes the proposal by verifying all transactions in the proposal

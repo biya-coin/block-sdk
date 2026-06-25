@@ -351,6 +351,17 @@ func (h *DefaultProposalHandler) exchangePrepareLaneHandler() PrepareLaneHandler
 					continue
 				}
 
+				if reserved := ReservedNonceSetFromContext(ctx); reserved != nil && reserved.Contains(senderStr, senderNonce) {
+					h.lane.Logger().Debug(
+						"failed to select tx for lane; tx nonce is reserved by extending blocks",
+						"tx_hash", utils.TxHash(txInfo.TxBytes),
+						"lane", h.lane.Name(),
+						"sender", senderStr,
+						"nonce", senderNonce,
+					)
+					continue
+				}
+
 				// verify_single: fastNonceVerifier for single-signer tx.
 				// senderIndex is iterated in ascending nonce order, so:
 				//   cmp < 0 (stale):  nonce < expected → remove (will never be valid again).
@@ -588,6 +599,17 @@ func (h *DefaultProposalHandler) PrepareLaneHandler() PrepareLaneHandler {
 					"failed to select tx for lane; tx is already in proposal",
 					"tx_hash", utils.TxHash(txInfo.TxBytes),
 					"lane", h.lane.Name(),
+				)
+				continue
+			}
+
+			if reserved := ReservedNonceSetFromContext(ctx); reserved != nil && reserved.Contains(senderStr, senderNonce) {
+				h.lane.Logger().Debug(
+					"failed to select tx for lane; tx nonce is reserved by extending blocks",
+					"tx_hash", utils.TxHash(txInfo.TxBytes),
+					"lane", h.lane.Name(),
+					"sender", senderStr,
+					"nonce", senderNonce,
 				)
 				continue
 			}
