@@ -1,6 +1,7 @@
 package base
 
 import (
+	"context"
 	"fmt"
 
 	"cosmossdk.io/log"
@@ -34,6 +35,10 @@ type BaseLane struct { //nolint
 	// matchHandler is the function that determines whether a transaction
 	// should be processed by this lane.
 	matchHandler MatchHandler
+
+	// signerMatchHandler is the function that determines whether a transaction
+	// should be processed by this lane when signer data is already available.
+	signerMatchHandler SignerMatchHandler
 
 	// prepareLaneHandler is the function that is called when a new proposal is being
 	// requested and the lane needs to submit transactions it wants to be included in the block.
@@ -126,6 +131,16 @@ func (l *BaseLane) Match(ctx sdk.Context, tx sdk.Tx) bool {
 	return l.matchHandler(ctx, tx)
 }
 
+// MatchWithSigner returns true if the transaction should be processed by this
+// lane using the first signer address that was already extracted by the caller.
+func (l *BaseLane) MatchWithSigner(ctx sdk.Context, tx sdk.Tx, firstSigner string) bool {
+	if l.signerMatchHandler == nil {
+		return l.Match(ctx, tx)
+	}
+
+	return l.signerMatchHandler(ctx, tx, firstSigner)
+}
+
 // Name returns the name of the lane.
 func (l *BaseLane) Name() string {
 	return l.laneName
@@ -149,6 +164,19 @@ func (l *BaseLane) TxEncoder() sdk.TxEncoder {
 // SignerExtractor returns the signer extractor for the lane.
 func (l *BaseLane) SignerExtractor() signer_extraction.Adapter {
 	return l.cfg.SignerExtractor
+}
+
+// InsertWithSenderNonce inserts a transaction into the lane using sender/nonce
+// data that was already extracted by the caller.
+func (l *BaseLane) InsertWithSenderNonce(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
+	mempool, ok := l.LaneMempool.(interface {
+		InsertWithSenderNonce(context.Context, sdk.Tx, string, uint64) error
+	})
+	if !ok {
+		return l.Insert(ctx, tx)
+	}
+
+	return mempool.InsertWithSenderNonce(ctx, tx, sender, nonce)
 }
 
 // ContainsWithSigners returns true if the transaction is contained in the lane

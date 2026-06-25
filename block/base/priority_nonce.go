@@ -247,8 +247,36 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 
 	signer := signers[0]
 	sender := signer.Signer.String()
-	priority := mp.cfg.TxPriority.GetTxPriority(ctx, tx)
-	nonce := signer.Sequence
+
+	return mp.insertWithSenderNonceLocked(ctx, tx, sender, signer.Sequence)
+}
+
+// InsertWithSenderNonce inserts a transaction using sender/nonce data that was
+// already extracted by the caller.
+func (mp *PriorityNonceMempool[C]) InsertWithSenderNonce(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
+	// priority_nonce_lock_wait: 5ms
+	// priority_nonce_lock_held: 56ms (4+13+40)
+	// InsertWithSenderNonce ≈ 61ms
+	// tLockWait := time.Now()
+	mp.mux.Lock()
+	// inserttrace.Observe(ctx, "priority_nonce_lock_wait", tLockWait)
+	// tLockHeld := time.Now()
+	defer mp.mux.Unlock()
+	// defer inserttrace.Observe(ctx, "priority_nonce_lock_held", tLockHeld)
+
+	if mp.cfg.MaxTx > 0 && mp.priorityIndex.Len() >= mp.cfg.MaxTx {
+		return sdkmempool.ErrMempoolTxMaxCapacity
+	} else if mp.cfg.MaxTx < 0 {
+		return nil
+	}
+
+	return mp.insertWithSenderNonceLocked(ctx, tx, sender, nonce)
+}
+
+func (mp *PriorityNonceMempool[C]) insertWithSenderNonceLocked(ctx context.Context, tx sdk.Tx, sender string, nonce uint64) error {
+	// priority := mp.cfg.TxPriority.GetTxPriority(ctx, tx)
+	var priority C
+	// 去掉优先级机制，最终应该是按时间顺序排序
 	key := txMeta[C]{nonce: nonce, priority: priority, sender: sender}
 
 	senderIndex, ok := mp.senderIndices[sender]
@@ -268,9 +296,15 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 	//
 	// This O(log n) remove operation is rare and only happens when a tx's priority
 	// changes.
+
+	// priority_nonce_replacement:  4ms
+	// priority_nonce_sender_set:   13ms
+	// priority_nonce_priority_set: 40ms
+	// tReplacement := time.Now()
 	sk := txMeta[C]{nonce: nonce, sender: sender}
 	if oldScore, txExists := mp.scores[sk]; txExists {
 		if mp.cfg.TxReplacement != nil && !mp.cfg.TxReplacement(oldScore.priority, priority, senderIndex.Get(key).Value.(sdk.Tx), tx) {
+			// inserttrace.Observe(ctx, "priority_nonce_replacement", tReplacement)
 			return fmt.Errorf(
 				"tx doesn't fit the replacement rule, oldPriority: %v, newPriority: %v, oldTx: %v, newTx: %v",
 				oldScore.priority,
@@ -288,15 +322,21 @@ func (mp *PriorityNonceMempool[C]) Insert(ctx context.Context, tx sdk.Tx) error 
 		})
 		mp.priorityCounts[oldScore.priority]--
 	}
+	// inserttrace.Observe(ctx, "priority_nonce_replacement", tReplacement)
 
 	mp.priorityCounts[priority]++
 
 	// Since senderIndex is scored by nonce, a changed priority will overwrite the
 	// existing key.
+	// tSenderSet := time.Now()
 	key.senderElement = senderIndex.Set(key, tx)
+	// inserttrace.Observe(ctx, "priority_nonce_sender_set", tSenderSet)
 
 	mp.scores[sk] = txMeta[C]{priority: priority}
+
+	// tPrioritySet := time.Now()
 	mp.priorityIndex.Set(key, tx)
+	// inserttrace.Observe(ctx, "priority_nonce_priority_set", tPrioritySet)
 
 	return nil
 }
